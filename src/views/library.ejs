@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Библиотека · LinkCatcher</title>
+    <link rel="icon" type="image/png" href="/public/icon.png" />
+    <link rel="stylesheet" href="/public/style.css" />
+  </head>
+  <body class="home-page library-page">
+    <div class="liquid-bg">
+      <div class="orb orb-a"></div>
+      <div class="orb orb-b"></div>
+      <div class="orb orb-c"></div>
+      <div class="mesh"></div>
+    </div>
+
+    <%
+      const typeLabels = {
+        file: 'ПРЯМОЙ ФАЙЛ',
+        hls: 'HLS',
+        youtube: 'YOUTUBE',
+        instagram: 'INSTAGRAM',
+        rutube: 'RUTUBE',
+        ok: 'OK',
+        vk: 'VK VIDEO'
+      };
+      const statusLabels = {
+        ready: 'ГОТОВО'
+      };
+
+      const visibleItems = items.filter((item) => item.status === 'ready');
+
+      function bytesToText(value) {
+        const bytes = Number(value || 0);
+        if (bytes < 1024) return `${bytes} B`;
+        if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+        if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+        return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+      }
+    %>
+
+    <main class="home-shell">
+      <header class="home-top">
+        <a class="home-pill brand-pill" href="/">
+          <img class="brand-icon" src="/public/icon.png" alt="LinkCatcher" />
+          LinkCatcher
+        </a>
+        <a class="home-pill library-pill" href="/">На главную</a>
+      </header>
+
+      <section class="home-hero">
+        <h1 class="home-title">БИБЛИОТЕКА</h1>
+        <p class="home-subtitle">Сохранённые загрузки для офлайн-воспроизведения</p>
+      </section>
+
+      <section class="home-formats library-list-wrap">
+        <% if (!visibleItems.length) { %>
+          <div class="status-inline">
+            <p class="muted">Пока нет загруженных элементов.</p>
+          </div>
+        <% } else { %>
+          <div class="list-items library-clean-list">
+            <% for (const item of visibleItems) { %>
+              <article class="library-item clean-item" id="row-<%= item.id %>">
+                <h3 class="clean-title"><%= item.title %></h3>
+
+                <div class="clean-meta">
+                  <p><span>Платформа</span><strong><%= typeLabels[item.type] || item.type %></strong></p>
+                  <p><span>Размер</span><strong><%= bytesToText(item.sizeBytes) %></strong></p>
+                  <p><span>Статус</span><strong class="status-text status-<%= item.status %>"><%= statusLabels[item.status] || item.status %></strong></p>
+                </div>
+
+                <div class="item-actions">
+                  <% if (item.status === 'ready') { %>
+                    <a href="/download/<%= item.id %>" class="link-tool" download>Скачать</a>
+                    <a href="/play/<%= item.id %>" class="link-tool">Смотреть</a>
+                  <% } %>
+                  <button class="link-tool" data-id="<%= item.id %>">Удалить</button>
+                </div>
+              </article>
+            <% } %>
+          </div>
+        <% } %>
+      </section>
+    </main>
+
+    <script>
+      const deleteButtons = document.querySelectorAll('button[data-id]');
+
+      async function deleteItem(id) {
+        const response = await fetch(`/api/items/${id}`, { method: 'DELETE' });
+        if (!response.ok) {
+          alert('Не удалось удалить элемент.');
+          return;
+        }
+
+        const row = document.getElementById(`row-${id}`);
+        if (row) {
+          row.remove();
+        }
+      }
+
+      for (const button of deleteButtons) {
+        button.addEventListener('click', async () => {
+          const id = button.getAttribute('data-id');
+          if (!id) return;
+
+          const confirmed = window.confirm('Удалить элемент и локальные файлы?');
+          if (!confirmed) return;
+
+          await deleteItem(id);
+        });
+      }
+    </script>
+  </body>
+</html>

@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Player · <%= item.title %></title>
+    <link rel="icon" type="image/png" href="/public/icon.png" />
+    <link rel="stylesheet" href="/public/style.css" />
+  </head>
+  <body class="home-page player-page">
+    <div class="liquid-bg">
+      <div class="orb orb-a"></div>
+      <div class="orb orb-b"></div>
+      <div class="orb orb-c"></div>
+      <div class="mesh"></div>
+    </div>
+
+    <%
+      const typeLabels = {
+        file: 'ПРЯМОЙ ФАЙЛ',
+        hls: 'HLS',
+        youtube: 'YOUTUBE',
+        instagram: 'INSTAGRAM',
+        rutube: 'RUTUBE',
+        ok: 'OK',
+        vk: 'VK VIDEO',
+        unsupported: 'НЕ ПОДДЕРЖИВАЕТСЯ'
+      };
+      const statusLabels = {
+        queued: 'В ОЧЕРЕДИ',
+        downloading: 'ЗАГРУЗКА',
+        ready: 'ГОТОВО',
+        unsupported: 'НЕ ПОДДЕРЖИВАЕТСЯ',
+        error: 'ОШИБКА'
+      };
+      const canDownload = item.status === 'ready';
+    %>
+
+    <main class="home-shell">
+      <header class="home-top player-top">
+        <a class="home-pill brand-pill" href="/">
+          <img class="brand-icon" src="/public/icon.png" alt="LinkCatcher" />
+          LinkCatcher
+        </a>
+
+        <nav class="player-nav">
+          <a class="home-pill nav-pill" href="/">Главная</a>
+          <a class="home-pill nav-pill active" href="/library">Библиотека</a>
+        </nav>
+
+        <a class="home-pill library-pill" href="/library">Назад к библиотеке</a>
+      </header>
+
+      <section class="home-hero player-hero">
+        <p class="eyebrow">Local Player</p>
+        <h1 class="home-title"><%= item.title %></h1>
+        <p class="home-subtitle player-subtitle">
+          Тип: <strong><%= typeLabels[item.type] || item.type %></strong>
+          · Статус: <strong class="status-text status-<%= item.status %>"><%= statusLabels[item.status] || item.status %></strong>
+        </p>
+        <% if (canDownload) { %>
+          <div class="inline-links">
+            <a class="link-tool" href="/download/<%= item.id %>" download>Скачать на устройство</a>
+          </div>
+        <% } %>
+      </section>
+
+      <section class="home-formats player-stage">
+        <div class="player-frame">
+          <% if (error) { %>
+            <p class="error"><%= error %></p>
+          <% } else if (mediaKind === 'image') { %>
+            <img src="<%= mediaUrl %>" alt="<%= item.title %>" class="image-player" />
+          <% } else if (mediaKind === 'video') { %>
+            <video controls preload="metadata" src="<%= mediaUrl %>" class="video-player"></video>
+          <% } else if (mediaKind === 'hls') { %>
+            <video id="video" controls preload="metadata" class="video-player"></video>
+            <p id="hls-message" class="muted"></p>
+            <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+            <script>
+              const source = <%- JSON.stringify(mediaUrl) %>;
+              const video = document.getElementById('video');
+              const message = document.getElementById('hls-message');
+
+              if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                video.src = source;
+              } else if (window.Hls && window.Hls.isSupported()) {
+                const hls = new window.Hls();
+                hls.loadSource(source);
+                hls.attachMedia(video);
+              } else {
+                message.textContent = 'Этот браузер не поддерживает воспроизведение HLS.';
+              }
+            </script>
+          <% } else { %>
+            <p class="error">Неподдерживаемый тип элемента.</p>
+          <% } %>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

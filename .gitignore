@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.env
+.DS_Store
+
+storage/*
+!storage/.gitkeep
+
+data/*
+!data/.gitkeep
+
+vendor/youtube-dl/**/__pycache__/
+vendor/youtube-dl/**/*.pyc

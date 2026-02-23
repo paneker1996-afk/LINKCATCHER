@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LinkCatcher</title>
+    <link rel="icon" type="image/png" href="/public/icon.png" />
+    <link rel="stylesheet" href="/public/style.css" />
+  </head>
+  <body class="home-page">
+    <div class="liquid-bg">
+      <div class="orb orb-a"></div>
+      <div class="orb orb-b"></div>
+      <div class="orb orb-c"></div>
+      <div class="mesh"></div>
+    </div>
+
+    <main class="home-shell">
+      <header class="home-top">
+        <span class="home-pill brand-pill">
+          <img class="brand-icon" src="/public/icon.png" alt="LinkCatcher" />
+          LinkCatcher
+        </span>
+        <a class="home-pill library-pill" href="/library">Открыть библиотеку</a>
+      </header>
+
+      <section class="home-hero">
+        <h1 class="home-title">LINKCATCHER</h1>
+        <p class="home-subtitle">Мульти-источник для загрузки видео и плейлистов в локальную библиотеку</p>
+      </section>
+
+      <section class="home-composer" id="composer">
+        <form id="inbox-form" class="url-bar">
+          <input id="url" name="url" type="url" placeholder="Вставьте свой URL" required />
+          <button type="submit" class="submit-pill">Скачать</button>
+        </form>
+
+        <div class="source-tags" aria-label="supported sources">
+          <span class="mini-tag">YOUTUBE</span>
+          <span class="mini-tag">INSTAGRAM</span>
+          <span class="mini-tag">RUTUBE</span>
+          <span class="mini-tag">VK VIDEO</span>
+          <span class="mini-tag">OK</span>
+          <span class="mini-tag">ПРЯМОЙ ФАЙЛ</span>
+          <span class="mini-tag">HLS</span>
+        </div>
+
+      </section>
+
+      <section id="youtube-formats" class="home-formats"></section>
+      <section id="status" class="home-status"></section>
+    </main>
+
+    <script>
+      const form = document.getElementById('inbox-form');
+      const urlInput = document.getElementById('url');
+      const formatsBox = document.getElementById('youtube-formats');
+      const statusBox = document.getElementById('status');
+      const statusLabels = {
+        queued: 'в очереди',
+        downloading: 'загрузка',
+        ready: 'готово',
+        unsupported: 'не поддерживается',
+        error: 'ошибка'
+      };
+
+      let selectedFormatId = null;
+      let currentPollTimer = null;
+      let isSubmitting = false;
+
+      function isLikelyYoutubeUrl(url) {
+        return /(^https?:\/\/)?([a-z0-9-]+\.)*(youtube\.com|youtu\.be)(\/|$)/i.test(url);
+      }
+
+      function escapeHtml(value) {
+        return String(value)
+          .replaceAll('&', '&amp;')
+          .replaceAll('<', '&lt;')
+          .replaceAll('>', '&gt;')
+          .replaceAll('"', '&quot;')
+          .replaceAll("'", '&#039;');
+      }
+
+      function stopPolling() {
+        if (currentPollTimer) {
+          clearInterval(currentPollTimer);
+          currentPollTimer = null;
+        }
+      }
+
+      function renderResult(item) {
+        const itemId = escapeHtml(item.id);
+        const reason = item.reason ? `<p class="reason">${escapeHtml(item.reason)}</p>` : '';
+        const playLink = item.status === 'ready' ? `<a class="link-tool" href="/play/${itemId}">Смотреть</a>` : '';
+        const downloadLink = item.status === 'ready' ? `<a class="link-tool" href="/download/${itemId}" download>Скачать</a>` : '';
+        const statusLabel = statusLabels[item.status] || item.status;
+
+        statusBox.innerHTML = `
+          <div class="status-inline">
+            <p><strong>Статус:</strong> <span class="status-text status-${item.status}">${escapeHtml(statusLabel)}</span></p>
+            ${reason}
+            <div class="inline-links">
+              ${downloadLink}
+              ${playLink}
+              <a class="link-tool" href="/library">Перейти в библиотеку</a>
+            </div>
+          </div>
+        `;
+      }
+
+      function clearFormats() {
+        selectedFormatId = null;
+        formatsBox.innerHTML = '';
+      }
+
+      async function submitInbox(url, formatId) {
+        if (isSubmitting) {
+          return;
+        }
+
+        isSubmitting = true;
+        stopPolling();
+        statusBox.innerHTML = '<p class="muted">Отправка…</p>';
+
+        try {
+          const response = await fetch('/api/inbox', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              url,
+              formatId
+            })
+          });
+
+          const payload = await response.json();
+
+          if (!response.ok) {
+            statusBox.innerHTML = `<p class="error">${payload.error || 'Не удалось выполнить запрос.'}</p>`;
+            return;
+          }
+
+          const initial = {
+            id: payload.id,
+            status: payload.status,
+            reason: payload.reason || null
+          };
+
+          renderResult(initial);
+
+          if (!['ready', 'unsupported', 'error'].includes(initial.status)) {
+            currentPollTimer = setInterval(() => pollItem(initial.id), 2000);
+          }
+        } catch (error) {
+          statusBox.innerHTML = '<p class="error">Не удалось отправить ссылку.</p>';
+        } finally {
+          isSubmitting = false;
+        }
+      }
+
+      function renderFormats(payload, sourceUrl) {
+        const formats = Array.isArray(payload.formats) ? payload.formats : [];
+        if (!formats.length) {
+          formatsBox.innerHTML = '<p class="error">Не удалось получить варианты YouTube.</p>';
+          selectedFormatId = null;
+          return;
+        }
+
+        selectedFormatId = null;
+
+        formatsBox.innerHTML = `
+          <div class="formats-inline">
+            <p><strong>YouTube:</strong> ${escapeHtml(payload.title || 'Видео')}</p>
+            <p class="muted">Выберите формат. После выбора загрузка начнется автоматически.</p>
+            <div class="formats-list">
+              ${formats
+                .slice(0, 20)
+                .map(
+                  (format, index) => `
+                    <label class="format-option">
+                      <input type="radio" name="youtube-format" value="${escapeHtml(format.formatId)}" />
+                      <span>${escapeHtml(format.label)}</span>
+                    </label>
+                  `
+                )
+                .join('')}
+            </div>
+          </div>
+        `;
+
+        const radios = formatsBox.querySelectorAll('input[name="youtube-format"]');
+        for (const radio of radios) {
+          radio.addEventListener('change', async () => {
+            selectedFormatId = radio.value || null;
+            if (!selectedFormatId) {
+              return;
+            }
+
+            statusBox.innerHTML = '<p class="muted">Формат выбран. Запускаю загрузку…</p>';
+            await submitInbox(sourceUrl, selectedFormatId);
+          });
+        }
+      }
+
+      async function loadYoutubeFormats(url) {
+        if (!url) {
+          formatsBox.innerHTML = '<p class="error">Сначала вставьте ссылку.</p>';
+          return;
+        }
+
+        formatsBox.innerHTML = '<p class="muted">Загружаю варианты YouTube…</p>';
+        try {
+          const response = await fetch('/api/youtube/formats', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ url })
+          });
+
+          const payload = await response.json();
+          if (!response.ok) {
+            formatsBox.innerHTML = `<p class="error">${payload.error || 'Не удалось получить варианты.'}</p>`;
+            selectedFormatId = null;
+            return;
+          }
+
+          renderFormats(payload, url);
+        } catch (error) {
+          formatsBox.innerHTML = '<p class="error">Ошибка при получении вариантов YouTube.</p>';
+          selectedFormatId = null;
+        }
+      }
+
+      async function pollItem(id) {
+        try {
+          const response = await fetch(`/api/items/${id}`);
+          if (!response.ok) {
+            stopPolling();
+            return;
+          }
+
+          const item = await response.json();
+          renderResult(item);
+
+          if (['ready', 'unsupported', 'error'].includes(item.status)) {
+            stopPolling();
+          }
+        } catch (error) {
+          stopPolling();
+        }
+      }
+
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const sourceUrl = urlInput.value.trim();
+        if (!sourceUrl) {
+          statusBox.innerHTML = '<p class="error">Вставьте ссылку.</p>';
+          return;
+        }
+
+        if (isLikelyYoutubeUrl(sourceUrl)) {
+          stopPolling();
+          statusBox.innerHTML = '<p class="muted">Шаг 1/2: выберите формат YouTube.</p>';
+          await loadYoutubeFormats(sourceUrl);
+          return;
+        }
+
+        clearFormats();
+        await submitInbox(sourceUrl, null);
+      });
+
+      urlInput.addEventListener('input', () => {
+        clearFormats();
+      });
+    </script>
+  </body>
+</html>

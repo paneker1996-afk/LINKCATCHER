@@ -1,0 +1,42 @@
+{
+  "name": "linkcatcher",
+  "version": "1.0.0",
+  "description": "Minimal web service MVP for importing direct video files and open HLS streams.",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "nodemon",
+    "build": "rm -rf dist && tsc && cp -R src/views dist/views && cp -R src/public dist/public",
+    "start": "node dist/server.js",
+    "youtube-dl:version": "bash tools/youtube-dl.sh --version",
+    "youtube-dl:help": "bash tools/youtube-dl.sh --help"
+  },
+  "keywords": [
+    "video",
+    "hls",
+    "express",
+    "sqlite",
+    "typescript"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "ejs": "^3.1.10",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "ffmpeg-static": "^5.3.0",
+    "mime-types": "^2.1.35"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/ejs": "^3.1.5",
+    "@types/express": "^4.17.21",
+    "@types/mime-types": "^2.1.4",
+    "@types/node": "^22.13.9",
+    "nodemon": "^3.1.9",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

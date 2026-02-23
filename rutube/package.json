@@ -1,0 +1,58 @@
+{
+	"name": "rutube-downloader",
+	"description": "Скачивание видео с RuTube, ВКонтакте, Одноклассники, Aser.pro",
+	"version": "3.2.2",
+	"license": "MIT",
+	"main": "index.js",
+	"scripts": {
+		"test": "npm i"
+	},
+	"author": {
+		"name": "ProjectSoft",
+		"email": "projectsoft2009@yandex.ru"
+	},
+	"contributors": [
+		{
+			"name": "valera-steb",
+			"email": "valera.steb@yandex.com"
+		}
+	],
+	"dependencies": {
+		"ansi-colors": "4.1.3",
+		"archiver": "^7.0.1",
+		"cli-progress": "3.12.0",
+		"emoji-strip": "^1.0.1",
+		"encoding": "^0.1.13",
+		"m3u8-parser": "7.1.0",
+		"mime-types": "^3.0.1",
+		"node-fetch": "2.6.1",
+		"sanitize-filename": "1.6.3",
+		"split-file": "2.3.0"
+	},
+	"devDependencies": {
+		"nodejs-file-downloader": "^4.13.0",
+		"prettier": "2.8.0"
+	},
+	"prettier": {
+		"endOfLine": "crlf",
+		"overrides": [
+			{
+				"files": [
+					"**/*.js",
+					"**/*.ts",
+					"**/*.tsx"
+				],
+				"options": {
+					"tabWidth": 4,
+					"semi": true,
+					"jsxBracketSameLine": true,
+					"arrowParens": "avoid",
+					"parser": "typescript"
+				}
+			}
+		]
+	},
+	"overrides": {
+		"whatwg-url": "^14.0.0"
+	}
+}
