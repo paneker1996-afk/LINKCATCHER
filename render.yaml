@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: linkcatcher
+    env: docker
+    autoDeploy: true
+    healthCheckPath: /health
+    disk:
+      name: linkcatcher-persist
+      mountPath: /app/persist
+      sizeGB: 10
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATA_DIR
+        value: /app/persist/data
+      - key: STORAGE_DIR
+        value: /app/persist/storage
+      - key: MAX_DOWNLOAD_BYTES
+        value: "1073741824"
+      - key: MAX_HLS_SEGMENTS
+        value: "5000"
+      - key: REQUEST_TIMEOUT_MS
+        value: "30000"

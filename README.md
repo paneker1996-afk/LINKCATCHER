@@ -75,9 +75,47 @@ npm run build
 npm start
 ```
 
+## Deploy (Railway / Render)
+
+`Vercel` serverless is not suitable for this backend because the service depends on:
+- local persistent filesystem (`./data`, `./storage`)
+- long-running downloads
+- child processes (`python3` for `youtube-dl`, `ffmpeg`)
+
+This repo now includes a Docker-based deployment setup for Railway and Render.
+
+### Railway
+
+1. Push this repo to GitHub.
+2. In Railway: `New Project` -> `Deploy from GitHub repo`.
+3. Railway will use `Dockerfile` + `railway.json`.
+4. Add a persistent volume and mount it, for example at `/app/persist`.
+5. Set environment variables:
+   - `DATA_DIR=/app/persist/data`
+   - `STORAGE_DIR=/app/persist/storage`
+   - `MAX_DOWNLOAD_BYTES=1073741824`
+   - `MAX_HLS_SEGMENTS=5000`
+6. Deploy and open `/health` to verify.
+
+### Render
+
+1. Push repo to GitHub.
+2. In Render create a new `Blueprint` service from this repository.
+3. Render will read `render.yaml` and create:
+   - Docker web service
+   - persistent disk mounted at `/app/persist`
+4. Verify env vars from `render.yaml`:
+   - `DATA_DIR=/app/persist/data`
+   - `STORAGE_DIR=/app/persist/storage`
+5. Deploy and open `/health`.
+
 ## Environment variables (optional)
 
 - `PORT` (default: `3000`)
+- `HOST` (default: `0.0.0.0`)
+- `DATA_DIR` (default: `./data`)
+- `STORAGE_DIR` (default: `./storage`)
+- `DB_PATH` (default: `DATA_DIR/linkcatcher.db`)
 - `MAX_DOWNLOAD_BYTES` (default: `1073741824` = 1GB)
 - `MAX_HLS_SEGMENTS` (default: `5000`)
 - `REQUEST_TIMEOUT_MS` (default: `30000`)
