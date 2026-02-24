@@ -6,8 +6,28 @@ import path from 'path';
 import express from 'express';
 import rateLimit from 'express-rate-limit';
 import mime from 'mime-types';
-import { STORAGE_DIR } from './config';
-import { createItem, deleteItemByOwner, getItemByOwner, listItemsByOwner, updateItem } from './db';
+import {
+  BASE_URL,
+  BOT_TOKEN,
+  DOWNLOAD_LINK_TTL_SECONDS,
+  SESSION_SECRET,
+  SESSION_TTL_SECONDS,
+  STORAGE_DIR,
+  TELEGRAM_AUTH_MAX_AGE_SECONDS,
+  TELEGRAM_ENABLED,
+  WEBAPP_URL
+} from './config';
+import {
+  createItem,
+  createTelegramSession,
+  deleteItem,
+  getItem,
+  getTelegramSessionUser,
+  listItems,
+  purgeExpiredTelegramSessions,
+  updateItem,
+  upsertTelegramUser
+} from './db';
 import { detectSource } from './detector';
 import { Downloader } from './downloader';
 import { UserInputError, errorMessage, isSafeItemId, safeJoin, validateHttpUrl } from './security';
@@ -16,12 +36,31 @@ import { getYoutubeFormats, isYoutubeUrl } from './youtube';
 const app = express();
 const downloader = new Downloader();
 const hlsTranscodeJobs = new Map<string, Promise<void>>();
-const SESSION_COOKIE_NAME = 'lc_uid';
-const ONE_YEAR_SECONDS = 60 * 60 * 24 * 365;
+const SESSION_COOKIE_NAME = 'lc_session';
+const baseUrlProtocol = (() => {
+  if (!BASE_URL) {
+    return null;
+  }
 
-interface RequestWithOwner extends express.Request {
-  ownerId?: string;
+  try {
+    return new URL(BASE_URL).protocol;
+  } catch {
+    return null;
+  }
+})();
+
+if (TELEGRAM_ENABLED && !BOT_TOKEN) {
+  throw new Error('BOT_TOKEN is required when TELEGRAM_ENABLED=true');
 }
+
+if (TELEGRAM_ENABLED && !SESSION_SECRET) {
+  throw new Error('SESSION_SECRET is required when TELEGRAM_ENABLED=true');
+}
+
+if (TELEGRAM_ENABLED && (!WEBAPP_URL || !/^https:\/\//i.test(WEBAPP_URL))) {
+  throw new Error('WEBAPP_URL must be a valid https:// URL when TELEGRAM_ENABLED=true');
+}
+
 const ffmpegStaticPath: string | null = (() => {
   try {
     const loaded = require('ffmpeg-static') as string | null;
@@ -39,108 +78,313 @@ app.use(express.json({ limit: '256kb' }));
 app.use(express.urlencoded({ extended: false }));
 app.use('/public', express.static(path.join(__dirname, 'public')));
 
-function parseCookieHeader(headerValue: string | undefined): Record<string, string> {
-  if (!headerValue) {
-    return {};
-  }
-
-  const parts = headerValue.split(';');
-  const result: Record<string, string> = {};
-  for (const rawPart of parts) {
-    const part = rawPart.trim();
-    if (!part) {
-      continue;
-    }
-    const separatorIndex = part.indexOf('=');
-    if (separatorIndex <= 0) {
-      continue;
-    }
-    const key = part.slice(0, separatorIndex).trim();
-    const value = part.slice(separatorIndex + 1).trim();
-    if (!key || !value) {
-      continue;
-    }
-    try {
-      result[key] = decodeURIComponent(value);
-    } catch {
-      result[key] = value;
-    }
-  }
-
-  return result;
-}
-
-function isValidOwnerId(value: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
-}
-
-function appendSetCookie(res: express.Response, value: string): void {
-  const current = res.getHeader('Set-Cookie');
-  if (!current) {
-    res.setHeader('Set-Cookie', value);
-    return;
-  }
-  if (Array.isArray(current)) {
-    res.setHeader('Set-Cookie', [...current, value]);
-    return;
-  }
-  res.setHeader('Set-Cookie', [String(current), value]);
-}
-
-function ensureOwnerId(req: express.Request, res: express.Response): string {
-  const cookies = parseCookieHeader(req.headers.cookie);
-  const existing = cookies[SESSION_COOKIE_NAME];
-  if (existing && isValidOwnerId(existing)) {
-    return existing;
-  }
-
-  const ownerId = crypto.randomUUID();
-  const isSecure = req.secure || req.get('x-forwarded-proto')?.toLowerCase().includes('https');
-  const cookieParts = [
-    `${SESSION_COOKIE_NAME}=${encodeURIComponent(ownerId)}`,
-    'Path=/',
-    'HttpOnly',
-    'SameSite=Lax',
-    `Max-Age=${ONE_YEAR_SECONDS}`
-  ];
-  if (isSecure) {
-    cookieParts.push('Secure');
-  }
-  appendSetCookie(res, cookieParts.join('; '));
-
-  return ownerId;
-}
-
-function getOwnerId(req: express.Request): string {
-  const ownerId = (req as RequestWithOwner).ownerId;
-  if (!ownerId) {
-    throw new Error('Owner ID не инициализирован');
-  }
-  return ownerId;
-}
-
-app.use((req, res, next) => {
-  (req as RequestWithOwner).ownerId = ensureOwnerId(req, res);
-  next();
-});
-
 const inboxLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 15,
   standardHeaders: true,
   legacyHeaders: false,
   validate: false,
-  keyGenerator: (req) => {
-    const ownerId = (req as RequestWithOwner).ownerId;
-    if (ownerId && isValidOwnerId(ownerId)) {
-      return `owner:${ownerId}`;
-    }
-    return `ip:${req.ip}`;
-  },
+  keyGenerator: (req) => req.ip || 'unknown',
   message: {
     error: 'Слишком много запросов. Повторите через минуту.'
   }
 });
+
+interface TelegramInitDataUser {
+  id: number;
+  first_name: string;
+  last_name?: string;
+  username?: string;
+  language_code?: string;
+  is_bot?: boolean;
+  is_premium?: boolean;
+  allows_write_to_pm?: boolean;
+  photo_url?: string;
+}
+
+interface TelegramAuthPayload {
+  authDate: number;
+  user: TelegramInitDataUser;
+}
+
+function parseCookies(headerValue: string | undefined): Record<string, string> {
+  if (!headerValue) {
+    return {};
+  }
+
+  const cookies: Record<string, string> = {};
+  for (const pair of headerValue.split(';')) {
+    const [rawName, ...rest] = pair.split('=');
+    if (!rawName || rest.length === 0) {
+      continue;
+    }
+
+    const name = rawName.trim();
+    if (!name) {
+      continue;
+    }
+
+    const value = rest.join('=').trim();
+    if (!value) {
+      continue;
+    }
+
+    try {
+      cookies[name] = decodeURIComponent(value);
+    } catch {
+      cookies[name] = value;
+    }
+  }
+
+  return cookies;
+}
+
+function signSessionId(sessionId: string): string {
+  if (!SESSION_SECRET) {
+    return '';
+  }
+  return crypto.createHmac('sha256', SESSION_SECRET).update(sessionId).digest('base64url');
+}
+
+function buildSignedSessionToken(sessionId: string): string {
+  return `${sessionId}.${signSessionId(sessionId)}`;
+}
+
+function parseSignedSessionToken(token: string | undefined): string | null {
+  if (!token || !SESSION_SECRET) {
+    return null;
+  }
+
+  const separatorIndex = token.lastIndexOf('.');
+  if (separatorIndex < 1 || separatorIndex === token.length - 1) {
+    return null;
+  }
+
+  const sessionId = token.slice(0, separatorIndex);
+  const providedSignature = token.slice(separatorIndex + 1);
+  const expectedSignature = signSessionId(sessionId);
+
+  const providedBuffer = Buffer.from(providedSignature, 'utf8');
+  const expectedBuffer = Buffer.from(expectedSignature, 'utf8');
+  if (providedBuffer.length !== expectedBuffer.length) {
+    return null;
+  }
+
+  if (!crypto.timingSafeEqual(providedBuffer, expectedBuffer)) {
+    return null;
+  }
+
+  return sessionId;
+}
+
+function createDownloadToken(itemId: string): string {
+  if (!SESSION_SECRET) {
+    throw new UserInputError('SESSION_SECRET is missing for download token signing.', 500);
+  }
+
+  const expiresAt = Math.floor(Date.now() / 1000) + DOWNLOAD_LINK_TTL_SECONDS;
+  const payload = `${itemId}:${String(expiresAt)}`;
+  const signature = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url');
+  return `${String(expiresAt)}.${signature}`;
+}
+
+function verifyDownloadToken(itemId: string, token: string): boolean {
+  if (!SESSION_SECRET || !token) {
+    return false;
+  }
+
+  const separatorIndex = token.indexOf('.');
+  if (separatorIndex <= 0 || separatorIndex >= token.length - 1) {
+    return false;
+  }
+
+  const expiresAtRaw = token.slice(0, separatorIndex);
+  const providedSignature = token.slice(separatorIndex + 1);
+  if (!/^\d+$/.test(expiresAtRaw)) {
+    return false;
+  }
+
+  const expiresAt = Number.parseInt(expiresAtRaw, 10);
+  if (!Number.isFinite(expiresAt) || expiresAt <= Math.floor(Date.now() / 1000)) {
+    return false;
+  }
+
+  const expectedSignature = crypto
+    .createHmac('sha256', SESSION_SECRET)
+    .update(`${itemId}:${String(expiresAt)}`)
+    .digest('base64url');
+
+  const providedBuffer = Buffer.from(providedSignature, 'utf8');
+  const expectedBuffer = Buffer.from(expectedSignature, 'utf8');
+  if (providedBuffer.length !== expectedBuffer.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(providedBuffer, expectedBuffer);
+}
+
+function extractDownloadItemIdFromPath(pathname: string): string | null {
+  const match = pathname.match(/^\/download\/([a-zA-Z0-9-]{1,100})$/);
+  return match ? match[1] : null;
+}
+
+function shouldUseSecureCookie(req: express.Request): boolean {
+  if (baseUrlProtocol === 'https:') {
+    return true;
+  }
+
+  if (req.secure) {
+    return true;
+  }
+
+  const forwardedProto = req.headers['x-forwarded-proto'];
+  if (typeof forwardedProto === 'string') {
+    return forwardedProto.split(',').some((value) => value.trim().toLowerCase() === 'https');
+  }
+
+  if (Array.isArray(forwardedProto)) {
+    return forwardedProto.some((value) => value.trim().toLowerCase() === 'https');
+  }
+
+  return false;
+}
+
+function buildSessionCookie(req: express.Request, signedToken: string): string {
+  const attributes = [
+    `${SESSION_COOKIE_NAME}=${encodeURIComponent(signedToken)}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    `Max-Age=${String(SESSION_TTL_SECONDS)}`
+  ];
+
+  if (shouldUseSecureCookie(req)) {
+    attributes.push('Secure');
+  }
+
+  return attributes.join('; ');
+}
+
+function clearSessionCookie(req: express.Request): string {
+  const attributes = [`${SESSION_COOKIE_NAME}=`, 'Path=/', 'HttpOnly', 'SameSite=Lax', 'Max-Age=0'];
+  if (shouldUseSecureCookie(req)) {
+    attributes.push('Secure');
+  }
+  return attributes.join('; ');
+}
+
+function toTelegramUser(value: unknown): TelegramInitDataUser | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate.id !== 'number' || !Number.isFinite(candidate.id)) {
+    return null;
+  }
+
+  if (typeof candidate.first_name !== 'string' || candidate.first_name.trim().length === 0) {
+    return null;
+  }
+
+  return {
+    id: candidate.id,
+    first_name: candidate.first_name,
+    last_name: typeof candidate.last_name === 'string' ? candidate.last_name : undefined,
+    username: typeof candidate.username === 'string' ? candidate.username : undefined,
+    language_code: typeof candidate.language_code === 'string' ? candidate.language_code : undefined,
+    is_bot: Boolean(candidate.is_bot),
+    is_premium: Boolean(candidate.is_premium),
+    allows_write_to_pm: Boolean(candidate.allows_write_to_pm),
+    photo_url: typeof candidate.photo_url === 'string' ? candidate.photo_url : undefined
+  };
+}
+
+function validateTelegramInitData(initData: string): TelegramAuthPayload {
+  if (!BOT_TOKEN) {
+    throw new UserInputError('Telegram auth is not configured on server.', 500);
+  }
+
+  const params = new URLSearchParams(initData);
+  const receivedHash = params.get('hash');
+  if (!receivedHash || !/^[a-f0-9]{64}$/i.test(receivedHash)) {
+    throw new UserInputError('Некорректный hash Telegram initData.', 401);
+  }
+
+  const authDateRaw = params.get('auth_date');
+  const authDate = Number.parseInt(authDateRaw ?? '', 10);
+  if (!Number.isFinite(authDate) || authDate <= 0) {
+    throw new UserInputError('Некорректный auth_date в initData.', 401);
+  }
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (authDate > nowSec + 60) {
+    throw new UserInputError('auth_date из будущего. Проверьте время устройства.', 401);
+  }
+
+  if (nowSec - authDate > TELEGRAM_AUTH_MAX_AGE_SECONDS) {
+    throw new UserInputError('initData устарел. Откройте Mini App заново.', 401);
+  }
+
+  const dataCheckString = Array.from(params.entries())
+    .filter(([key]) => key !== 'hash')
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}=${value}`)
+    .join('\n');
+
+  const secretKey = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
+  const expectedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+
+  const receivedBuffer = Buffer.from(receivedHash.toLowerCase(), 'utf8');
+  const expectedBuffer = Buffer.from(expectedHash, 'utf8');
+  if (receivedBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(receivedBuffer, expectedBuffer)) {
+    throw new UserInputError('Подпись initData не прошла проверку.', 401);
+  }
+
+  const rawUser = params.get('user');
+  if (!rawUser) {
+    throw new UserInputError('initData не содержит user.', 401);
+  }
+
+  let parsedUser: unknown;
+  try {
+    parsedUser = JSON.parse(rawUser);
+  } catch {
+    throw new UserInputError('Некорректный формат user в initData.', 401);
+  }
+
+  const user = toTelegramUser(parsedUser);
+  if (!user) {
+    throw new UserInputError('Некорректные данные Telegram user.', 401);
+  }
+
+  return {
+    authDate,
+    user
+  };
+}
+
+function getTelegramSessionFromRequest(req: express.Request) {
+  if (!TELEGRAM_ENABLED) {
+    return null;
+  }
+
+  const cookies = parseCookies(req.headers.cookie);
+  const signedToken = cookies[SESSION_COOKIE_NAME];
+  const sessionId = parseSignedSessionToken(signedToken);
+  if (!sessionId) {
+    return null;
+  }
+
+  return getTelegramSessionUser(sessionId);
+}
+
+function renderWithTelegram(res: express.Response, view: string, payload: Record<string, unknown> = {}) {
+  res.render(view, {
+    ...payload,
+    telegramEnabled: TELEGRAM_ENABLED
+  });
+}
 
 function isSafeFormatId(value: string): boolean {
   return /^[a-zA-Z0-9._-]{1,40}$/.test(value);
@@ -348,14 +592,163 @@ function buildContentDisposition(fileName: string): string {
   return `attachment; filename="${safeAscii}"; filename*=UTF-8''${encoded}`;
 }
 
-app.get('/', (_req, res) => {
-  res.render('home');
+app.post('/api/telegram/auth', (req, res) => {
+  if (!TELEGRAM_ENABLED) {
+    res.status(400).json({ error: 'Telegram mode is disabled.' });
+    return;
+  }
+
+  const initData = typeof req.body?.initData === 'string' ? req.body.initData.trim() : '';
+  if (!initData) {
+    res.status(400).json({ error: 'Требуется поле initData.' });
+    return;
+  }
+
+  let authPayload: TelegramAuthPayload;
+  try {
+    authPayload = validateTelegramInitData(initData);
+  } catch (error) {
+    const status = error instanceof UserInputError ? error.statusCode : 401;
+    res.status(status).json({ error: errorMessage(error) });
+    return;
+  }
+
+  try {
+    purgeExpiredTelegramSessions();
+
+    const telegramId = String(authPayload.user.id);
+    upsertTelegramUser({
+      id: telegramId,
+      username: authPayload.user.username ?? null,
+      firstName: authPayload.user.first_name,
+      lastName: authPayload.user.last_name ?? null,
+      languageCode: authPayload.user.language_code ?? null,
+      isBot: authPayload.user.is_bot,
+      isPremium: authPayload.user.is_premium,
+      allowsWriteToPm: authPayload.user.allows_write_to_pm,
+      photoUrl: authPayload.user.photo_url ?? null
+    });
+
+    const sessionId = crypto.randomBytes(32).toString('hex');
+    const expiresAt = Date.now() + SESSION_TTL_SECONDS * 1000;
+    createTelegramSession(sessionId, telegramId, expiresAt);
+    res.setHeader('Set-Cookie', buildSessionCookie(req, buildSignedSessionToken(sessionId)));
+
+    res.json({
+      ok: true,
+      user: {
+        id: authPayload.user.id,
+        username: authPayload.user.username ?? null,
+        firstName: authPayload.user.first_name
+      }
+    });
+  } catch (error) {
+    console.error('Telegram auth persistence error:', error);
+    res.status(500).json({ error: 'Не удалось завершить авторизацию Telegram.' });
+  }
 });
 
-app.get('/library', (req, res) => {
-  const ownerId = getOwnerId(req);
-  const items = listItemsByOwner(ownerId);
-  res.render('library', { items });
+app.get('/api/telegram/me', (req, res) => {
+  if (!TELEGRAM_ENABLED) {
+    res.json({ enabled: false, authenticated: false });
+    return;
+  }
+
+  const user = getTelegramSessionFromRequest(req);
+  if (!user) {
+    res.status(401).json({ enabled: true, authenticated: false });
+    return;
+  }
+
+  res.json({ enabled: true, authenticated: true, user });
+});
+
+app.get('/api/download-link/:id', (req, res) => {
+  const { id } = req.params;
+  if (!isSafeItemId(id)) {
+    res.status(400).json({ error: 'Некорректный идентификатор элемента.' });
+    return;
+  }
+
+  const item = getItem(id);
+  if (!item) {
+    res.status(404).json({ error: 'Элемент не найден.' });
+    return;
+  }
+
+  if (item.status !== 'ready') {
+    res.status(409).json({ error: 'Элемент еще не готов к скачиванию.' });
+    return;
+  }
+
+  if (!['file', 'youtube', 'instagram', 'hls', 'rutube', 'ok', 'vk'].includes(item.type)) {
+    res.status(400).json({ error: 'Скачивание для этого типа источника не поддерживается.' });
+    return;
+  }
+
+  try {
+    const token = createDownloadToken(id);
+    res.json({
+      url: `/download/${id}?dl_token=${encodeURIComponent(token)}`
+    });
+  } catch (error) {
+    const status = error instanceof UserInputError ? error.statusCode : 500;
+    res.status(status).json({ error: errorMessage(error) });
+  }
+});
+
+app.use((req, res, next) => {
+  if (!TELEGRAM_ENABLED) {
+    return next();
+  }
+
+  if (req.path === '/health' || req.path === '/api/telegram/auth' || req.path === '/api/telegram/me') {
+    return next();
+  }
+
+  if (req.path.startsWith('/public/')) {
+    return next();
+  }
+
+  if (req.path.startsWith('/download/')) {
+    const itemId = extractDownloadItemIdFromPath(req.path);
+    const tokenValue = typeof req.query?.dl_token === 'string' ? req.query.dl_token.trim() : '';
+    if (itemId && tokenValue && verifyDownloadToken(itemId, tokenValue)) {
+      return next();
+    }
+  }
+
+  const requiresSession =
+    req.path.startsWith('/api/') ||
+    req.path.startsWith('/download/') ||
+    req.path.startsWith('/media/') ||
+    req.path.startsWith('/play/');
+
+  if (!requiresSession) {
+    return next();
+  }
+
+  const sessionUser = getTelegramSessionFromRequest(req);
+  if (!sessionUser) {
+    res.setHeader('Set-Cookie', clearSessionCookie(req));
+    if (req.path.startsWith('/api/')) {
+      res.status(401).json({ error: 'Требуется авторизация через Telegram Mini App.' });
+      return;
+    }
+    res.status(401).send('Требуется авторизация через Telegram Mini App.');
+    return;
+  }
+
+  return next();
+});
+
+app.get('/', (_req, res) => {
+  renderWithTelegram(res, 'home');
+});
+
+app.get('/library', (_req, res) => {
+  const items = listItems();
+  renderWithTelegram(res, 'library', { items });
 });
 
 app.get('/play/:id', async (req, res) => {
@@ -365,15 +758,14 @@ app.get('/play/:id', async (req, res) => {
     return;
   }
 
-  const ownerId = getOwnerId(req);
-  const item = getItemByOwner(id, ownerId);
+  const item = getItem(id);
   if (!item) {
     res.status(404).send('Элемент не найден.');
     return;
   }
 
   if (item.status !== 'ready') {
-    res.render('player', {
+    renderWithTelegram(res, 'player', {
       item,
       mediaUrl: null,
       mediaKind: null,
@@ -388,7 +780,7 @@ app.get('/play/:id', async (req, res) => {
   if (item.type === 'file' || item.type === 'youtube' || item.type === 'instagram') {
     const fileName = await findDirectMediaFileName(item.id);
     if (!fileName) {
-      res.render('player', {
+      renderWithTelegram(res, 'player', {
         item,
         mediaUrl: null,
         mediaKind: null,
@@ -407,7 +799,7 @@ app.get('/play/:id', async (req, res) => {
   }
 
   if (!mediaUrl) {
-    res.render('player', {
+    renderWithTelegram(res, 'player', {
       item,
       mediaUrl: null,
       mediaKind: null,
@@ -416,7 +808,7 @@ app.get('/play/:id', async (req, res) => {
     return;
   }
 
-  res.render('player', {
+  renderWithTelegram(res, 'player', {
     item,
     mediaUrl,
     mediaKind,
@@ -425,7 +817,6 @@ app.get('/play/:id', async (req, res) => {
 });
 
 app.post('/api/inbox', inboxLimiter, async (req, res) => {
-  const ownerId = getOwnerId(req);
   const sourceUrl = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
   const formatId =
     typeof req.body?.formatId === 'string' && req.body.formatId.trim().length > 0 ? req.body.formatId.trim() : undefined;
@@ -452,7 +843,6 @@ app.post('/api/inbox', inboxLimiter, async (req, res) => {
   const id = crypto.randomUUID();
   createItem({
     id,
-    ownerId,
     sourceUrl,
     finalUrl: parsedUrl.toString(),
     type: 'unsupported',
@@ -501,7 +891,7 @@ app.post('/api/inbox', inboxLimiter, async (req, res) => {
       title: resolvedTitle
     });
 
-    const queuedItem = getItemByOwner(id, ownerId);
+    const queuedItem = getItem(id);
     if (queuedItem) {
       downloader.start(queuedItem, {
         youtubeFormatId: queuedItem.type === 'youtube' ? formatId : undefined
@@ -549,8 +939,7 @@ app.post('/api/youtube/formats', inboxLimiter, async (req, res) => {
 });
 
 app.get('/api/items', (_req, res) => {
-  const ownerId = getOwnerId(_req);
-  res.json(listItemsByOwner(ownerId));
+  res.json(listItems());
 });
 
 app.get('/api/items/:id', (req, res) => {
@@ -560,8 +949,7 @@ app.get('/api/items/:id', (req, res) => {
     return;
   }
 
-  const ownerId = getOwnerId(req);
-  const item = getItemByOwner(id, ownerId);
+  const item = getItem(id);
   if (!item) {
     res.status(404).json({ error: 'Элемент не найден.' });
     return;
@@ -577,8 +965,7 @@ app.delete('/api/items/:id', async (req, res) => {
     return;
   }
 
-  const ownerId = getOwnerId(req);
-  const existing = getItemByOwner(id, ownerId);
+  const existing = getItem(id);
   if (!existing) {
     res.status(404).json({ error: 'Элемент не найден.' });
     return;
@@ -586,7 +973,7 @@ app.delete('/api/items/:id', async (req, res) => {
 
   downloader.cancel(id);
   await fs.rm(path.join(STORAGE_DIR, id), { recursive: true, force: true });
-  deleteItemByOwner(id, ownerId);
+  deleteItem(id);
 
   res.status(204).send();
 });
@@ -598,8 +985,7 @@ app.get('/download/:id', async (req, res) => {
     return;
   }
 
-  const ownerId = getOwnerId(req);
-  const item = getItemByOwner(id, ownerId);
+  const item = getItem(id);
   if (!item) {
     res.status(404).send('Элемент не найден.');
     return;
@@ -656,11 +1042,12 @@ app.get('/download/:id', async (req, res) => {
 
   const preferredExt = resolvePreferredDownloadExtension(item, storedFileName);
   const downloadFileName = buildDownloadFileNameWithPreferredExt(item.title || 'video', storedFileName, preferredExt);
+  const downloadMimeType = mime.lookup(downloadFileName) || mime.lookup(storedFileName) || 'application/octet-stream';
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Content-Disposition', buildContentDisposition(downloadFileName));
   res.setHeader('Content-Length', String(stat.size));
-  res.setHeader('Content-Type', 'application/octet-stream');
-  res.setHeader('Content-Transfer-Encoding', 'binary');
+  res.setHeader('Content-Type', String(downloadMimeType));
+  res.setHeader('Accept-Ranges', 'bytes');
   res.setHeader('Cache-Control', 'no-store');
 
   const stream = createReadStream(filePath);
@@ -683,8 +1070,7 @@ app.get('/media/:id/*', async (req, res) => {
     return;
   }
 
-  const ownerId = getOwnerId(req);
-  const item = getItemByOwner(id, ownerId);
+  const item = getItem(id);
   if (!item || item.status !== 'ready') {
     res.status(404).send('Медиа не найдено.');
     return;

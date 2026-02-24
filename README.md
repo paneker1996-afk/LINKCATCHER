@@ -36,10 +36,10 @@ LinkCatcher is a small Node.js + TypeScript MVP web service for importing and st
   - `/` Home (paste URL + live status polling)
   - `/library` Library list with Play/Delete
   - `/play/:id` Local playback (`<video>` / `hls.js`)
-- Per-user library isolation (anonymous session cookie):
-  - each browser/device gets its own `lc_uid`
-  - item listing/read/delete/play/download are scoped to that owner only
 - API endpoints:
+  - `POST /api/telegram/auth`
+  - `GET /api/telegram/me`
+  - `GET /api/download-link/:id`
   - `POST /api/inbox`
   - `POST /api/youtube/formats`
   - `GET /api/items`
@@ -70,6 +70,33 @@ npm run dev
 3. Open:
 
 - [http://localhost:3000](http://localhost:3000)
+
+## Telegram Mini App setup
+
+1. Create `.env` from template and fill values:
+
+```bash
+cp .env.example .env
+```
+
+Required for Telegram mode:
+- `TELEGRAM_ENABLED=true`
+- `BOT_TOKEN=...`
+- `WEBAPP_URL=https://<your-domain>/library`
+- `BASE_URL=https://<your-domain>`
+- `SESSION_SECRET=<long-random-secret>`
+
+2. Run web and bot in separate terminals:
+
+```bash
+npm run dev
+```
+
+```bash
+npm run bot:start
+```
+
+3. In Telegram, send `/start` to your bot and open Mini App button.
 
 ## Build and run production
 
@@ -122,6 +149,14 @@ This repo now includes a Docker-based deployment setup for Railway and Render.
 - `MAX_DOWNLOAD_BYTES` (default: `1073741824` = 1GB)
 - `MAX_HLS_SEGMENTS` (default: `5000`)
 - `REQUEST_TIMEOUT_MS` (default: `30000`)
+- `TELEGRAM_ENABLED` (default: `false`)
+- `BOT_TOKEN` (required if `TELEGRAM_ENABLED=true`)
+- `WEBAPP_URL` (required HTTPS URL if `TELEGRAM_ENABLED=true`)
+- `BASE_URL` (recommended in production for secure cookies)
+- `SESSION_SECRET` (required if `TELEGRAM_ENABLED=true`)
+- `SESSION_TTL_SECONDS` (default: `604800`)
+- `TELEGRAM_AUTH_MAX_AGE_SECONDS` (default: `86400`)
+- `DOWNLOAD_LINK_TTL_SECONDS` (default: `300`)
 - `YTDL_COOKIES_FILE` (path to cookies.txt, optional)
 - `YTDL_COOKIES_B64` (base64 of cookies.txt, optional)
 - `YTDL_USER_AGENT` (custom user-agent for yt-dlp/youtube-dl, optional)
@@ -147,7 +182,6 @@ base64 -i cookies.txt | tr -d '\n'
 - Large HLS playlists can take time to download because segments are stored locally for offline playback.
 - Deleting an item removes both DB metadata and corresponding local storage folder.
 - Unsupported reasons are source-specific (e.g. wrong Instagram path, blocked platform, non-media content type).
-- Anonymous per-device isolation uses cookies, so clearing browser cookies creates a new empty library.
 
 ## Vendored youtube-dl layout
 
@@ -158,4 +192,3 @@ base64 -i cookies.txt | tr -d '\n'
 - Convenience scripts:
   - `npm run youtube-dl:version`
   - `npm run youtube-dl:help`
-# LINKCATCHER

@@ -7,6 +7,8 @@
     "dev": "nodemon",
     "build": "rm -rf dist && tsc && cp -R src/views dist/views && cp -R src/public dist/public",
     "start": "node dist/server.js",
+    "bot:start": "node bot/telegram-bot.js",
+    "bot:dev": "node bot/telegram-bot.js",
     "youtube-dl:version": "bash tools/youtube-dl.sh --version",
     "youtube-dl:help": "bash tools/youtube-dl.sh --help"
   },

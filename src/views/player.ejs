@@ -8,6 +8,14 @@
     <link rel="stylesheet" href="/public/style.css" />
   </head>
   <body class="home-page player-page">
+    <% if (telegramEnabled) { %>
+      <div id="app-splash" class="app-splash" aria-hidden="true">
+        <video id="app-splash-video" class="app-splash-video" autoplay muted playsinline preload="auto">
+          <source src="/public/vidio_app.mp4" type="video/mp4" />
+        </video>
+      </div>
+    <% } %>
+
     <div class="liquid-bg">
       <div class="orb orb-a"></div>
       <div class="orb orb-b"></div>
@@ -50,6 +58,9 @@
 
         <a class="home-pill library-pill" href="/library">Назад к библиотеке</a>
       </header>
+      <% if (telegramEnabled) { %>
+        <div id="telegram-auth-banner" class="telegram-auth-banner" hidden></div>
+      <% } %>
 
       <section class="home-hero player-hero">
         <p class="eyebrow">Local Player</p>
@@ -60,7 +71,7 @@
         </p>
         <% if (canDownload) { %>
           <div class="inline-links">
-            <a class="link-tool" href="/download/<%= item.id %>" download>Скачать на устройство</a>
+            <a class="link-tool link-download" href="/download/<%= item.id %>" download>Скачать на устройство</a>
           </div>
         <% } %>
       </section>
@@ -98,5 +109,23 @@
         </div>
       </section>
     </main>
+    <% if (telegramEnabled) { %>
+      <script src="https://telegram.org/js/telegram-web-app.js"></script>
+      <script>
+        window.__LINKCATCHER_TELEGRAM__ = {
+          enabled: true,
+          requestTimeoutMs: 12000
+        };
+        window.__LINKCATCHER_SPLASH__ = {
+          enabled: true,
+          minShowMs: 1400,
+          maxShowMs: 4500,
+          oncePerSession: false
+        };
+      </script>
+      <script src="/public/telegram-webapp-auth.js"></script>
+      <script src="/public/app-splash.js"></script>
+    <% } %>
+    <script src="/public/download-helper.js"></script>
   </body>
 </html>

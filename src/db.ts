@@ -6,7 +6,6 @@ export type ItemStatus = 'queued' | 'downloading' | 'ready' | 'unsupported' | 'e
 
 export interface Item {
   id: string;
-  ownerId: string;
   sourceUrl: string;
   finalUrl: string;
   type: ItemType;
@@ -20,7 +19,6 @@ export interface Item {
 
 export interface NewItem {
   id: string;
-  ownerId: string;
   sourceUrl: string;
   finalUrl: string;
   type: ItemType;
@@ -40,13 +38,34 @@ export interface ItemPatch {
   sizeBytes?: number;
 }
 
+export interface TelegramUserInput {
+  id: string;
+  username?: string | null;
+  firstName: string;
+  lastName?: string | null;
+  languageCode?: string | null;
+  isBot?: boolean;
+  isPremium?: boolean;
+  allowsWriteToPm?: boolean;
+  photoUrl?: string | null;
+}
+
+export interface TelegramSessionUser {
+  id: string;
+  username: string | null;
+  firstName: string;
+  lastName: string | null;
+  languageCode: string | null;
+  photoUrl: string | null;
+}
+
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
 
 const ITEMS_TABLE_SQL = `
   CREATE TABLE IF NOT EXISTS items (
     id TEXT PRIMARY KEY,
-    ownerId TEXT NOT NULL,
     sourceUrl TEXT NOT NULL,
     finalUrl TEXT NOT NULL,
     type TEXT NOT NULL CHECK(type IN ('file', 'hls', 'youtube', 'instagram', 'rutube', 'ok', 'vk', 'unsupported')),
@@ -56,6 +75,32 @@ const ITEMS_TABLE_SQL = `
     sizeBytes INTEGER NOT NULL DEFAULT 0,
     createdAt INTEGER NOT NULL,
     updatedAt INTEGER NOT NULL
+  )
+`;
+
+const TELEGRAM_USERS_TABLE_SQL = `
+  CREATE TABLE IF NOT EXISTS telegram_users (
+    telegramId TEXT PRIMARY KEY,
+    username TEXT,
+    firstName TEXT NOT NULL,
+    lastName TEXT,
+    languageCode TEXT,
+    isBot INTEGER NOT NULL DEFAULT 0,
+    isPremium INTEGER NOT NULL DEFAULT 0,
+    allowsWriteToPm INTEGER NOT NULL DEFAULT 0,
+    photoUrl TEXT,
+    createdAt INTEGER NOT NULL,
+    updatedAt INTEGER NOT NULL
+  )
+`;
+
+const TELEGRAM_SESSIONS_TABLE_SQL = `
+  CREATE TABLE IF NOT EXISTS telegram_sessions (
+    sessionId TEXT PRIMARY KEY,
+    telegramId TEXT NOT NULL,
+    createdAt INTEGER NOT NULL,
+    expiresAt INTEGER NOT NULL,
+    FOREIGN KEY (telegramId) REFERENCES telegram_users(telegramId) ON DELETE CASCADE
   )
 `;
 
@@ -70,7 +115,6 @@ function migrateItemsTableIfNeeded(): void {
   }
 
   if (
-    current.sql.includes('ownerId') &&
     current.sql.includes("'youtube'") &&
     current.sql.includes("'instagram'") &&
     current.sql.includes("'rutube'") &&
@@ -84,8 +128,8 @@ function migrateItemsTableIfNeeded(): void {
     BEGIN;
     ALTER TABLE items RENAME TO items_old;
     ${ITEMS_TABLE_SQL};
-    INSERT INTO items (id, ownerId, sourceUrl, finalUrl, type, status, reason, title, sizeBytes, createdAt, updatedAt)
-    SELECT id, 'legacy', sourceUrl, finalUrl, type, status, reason, title, sizeBytes, createdAt, updatedAt
+    INSERT INTO items (id, sourceUrl, finalUrl, type, status, reason, title, sizeBytes, createdAt, updatedAt)
+    SELECT id, sourceUrl, finalUrl, type, status, reason, title, sizeBytes, createdAt, updatedAt
     FROM items_old;
     DROP TABLE items_old;
     COMMIT;
@@ -93,27 +137,80 @@ function migrateItemsTableIfNeeded(): void {
 }
 
 migrateItemsTableIfNeeded();
-
-db.exec('CREATE INDEX IF NOT EXISTS idx_items_owner_created ON items(ownerId, createdAt DESC)');
-db.exec('CREATE INDEX IF NOT EXISTS idx_items_owner_id ON items(ownerId, id)');
+db.exec(TELEGRAM_USERS_TABLE_SQL);
+db.exec(TELEGRAM_SESSIONS_TABLE_SQL);
+db.exec('CREATE INDEX IF NOT EXISTS idx_telegram_sessions_expires_at ON telegram_sessions (expiresAt)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_telegram_sessions_telegram_id ON telegram_sessions (telegramId)');
 
 const insertItemStmt = db.prepare(`
-  INSERT INTO items (id, ownerId, sourceUrl, finalUrl, type, status, reason, title, sizeBytes, createdAt, updatedAt)
-  VALUES (@id, @ownerId, @sourceUrl, @finalUrl, @type, @status, @reason, @title, @sizeBytes, @createdAt, @updatedAt)
+  INSERT INTO items (id, sourceUrl, finalUrl, type, status, reason, title, sizeBytes, createdAt, updatedAt)
+  VALUES (@id, @sourceUrl, @finalUrl, @type, @status, @reason, @title, @sizeBytes, @createdAt, @updatedAt)
 `);
 
 const getItemStmt = db.prepare('SELECT * FROM items WHERE id = ?');
-const getItemByOwnerStmt = db.prepare('SELECT * FROM items WHERE id = ? AND ownerId = ?');
 const listItemsStmt = db.prepare('SELECT * FROM items ORDER BY createdAt DESC');
-const listItemsByOwnerStmt = db.prepare('SELECT * FROM items WHERE ownerId = ? ORDER BY createdAt DESC');
 const deleteItemStmt = db.prepare('DELETE FROM items WHERE id = ?');
-const deleteItemByOwnerStmt = db.prepare('DELETE FROM items WHERE id = ? AND ownerId = ?');
+const upsertTelegramUserStmt = db.prepare(`
+  INSERT INTO telegram_users (
+    telegramId,
+    username,
+    firstName,
+    lastName,
+    languageCode,
+    isBot,
+    isPremium,
+    allowsWriteToPm,
+    photoUrl,
+    createdAt,
+    updatedAt
+  ) VALUES (
+    @telegramId,
+    @username,
+    @firstName,
+    @lastName,
+    @languageCode,
+    @isBot,
+    @isPremium,
+    @allowsWriteToPm,
+    @photoUrl,
+    @createdAt,
+    @updatedAt
+  )
+  ON CONFLICT(telegramId) DO UPDATE SET
+    username = excluded.username,
+    firstName = excluded.firstName,
+    lastName = excluded.lastName,
+    languageCode = excluded.languageCode,
+    isBot = excluded.isBot,
+    isPremium = excluded.isPremium,
+    allowsWriteToPm = excluded.allowsWriteToPm,
+    photoUrl = excluded.photoUrl,
+    updatedAt = excluded.updatedAt
+`);
+const insertTelegramSessionStmt = db.prepare(`
+  INSERT OR REPLACE INTO telegram_sessions (sessionId, telegramId, createdAt, expiresAt)
+  VALUES (@sessionId, @telegramId, @createdAt, @expiresAt)
+`);
+const getTelegramSessionUserStmt = db.prepare(`
+  SELECT
+    u.telegramId AS id,
+    u.username AS username,
+    u.firstName AS firstName,
+    u.lastName AS lastName,
+    u.languageCode AS languageCode,
+    u.photoUrl AS photoUrl
+  FROM telegram_sessions s
+  JOIN telegram_users u ON u.telegramId = s.telegramId
+  WHERE s.sessionId = ? AND s.expiresAt > ?
+  LIMIT 1
+`);
+const deleteTelegramSessionStmt = db.prepare('DELETE FROM telegram_sessions WHERE sessionId = ?');
+const deleteExpiredTelegramSessionsStmt = db.prepare('DELETE FROM telegram_sessions WHERE expiresAt <= ?');
 
 export function createItem(input: NewItem): Item {
   const now = Date.now();
   const record: Item = {
     id: input.id,
-    ownerId: input.ownerId,
     sourceUrl: input.sourceUrl,
     finalUrl: input.finalUrl,
     type: input.type,
@@ -134,17 +231,8 @@ export function getItem(id: string): Item | null {
   return row ?? null;
 }
 
-export function getItemByOwner(id: string, ownerId: string): Item | null {
-  const row = getItemByOwnerStmt.get(id, ownerId) as Item | undefined;
-  return row ?? null;
-}
-
 export function listItems(): Item[] {
   return listItemsStmt.all() as Item[];
-}
-
-export function listItemsByOwner(ownerId: string): Item[] {
-  return listItemsByOwnerStmt.all(ownerId) as Item[];
 }
 
 export function updateItem(id: string, patch: ItemPatch): void {
@@ -168,7 +256,41 @@ export function deleteItem(id: string): boolean {
   return result.changes > 0;
 }
 
-export function deleteItemByOwner(id: string, ownerId: string): boolean {
-  const result = deleteItemByOwnerStmt.run(id, ownerId);
-  return result.changes > 0;
+export function upsertTelegramUser(input: TelegramUserInput): void {
+  const now = Date.now();
+  upsertTelegramUserStmt.run({
+    telegramId: input.id,
+    username: input.username ?? null,
+    firstName: input.firstName,
+    lastName: input.lastName ?? null,
+    languageCode: input.languageCode ?? null,
+    isBot: input.isBot ? 1 : 0,
+    isPremium: input.isPremium ? 1 : 0,
+    allowsWriteToPm: input.allowsWriteToPm ? 1 : 0,
+    photoUrl: input.photoUrl ?? null,
+    createdAt: now,
+    updatedAt: now
+  });
+}
+
+export function createTelegramSession(sessionId: string, telegramId: string, expiresAt: number): void {
+  insertTelegramSessionStmt.run({
+    sessionId,
+    telegramId,
+    createdAt: Date.now(),
+    expiresAt
+  });
+}
+
+export function getTelegramSessionUser(sessionId: string): TelegramSessionUser | null {
+  const row = getTelegramSessionUserStmt.get(sessionId, Date.now()) as TelegramSessionUser | undefined;
+  return row ?? null;
+}
+
+export function deleteTelegramSession(sessionId: string): void {
+  deleteTelegramSessionStmt.run(sessionId);
+}
+
+export function purgeExpiredTelegramSessions(): void {
+  deleteExpiredTelegramSessionsStmt.run(Date.now());
 }
