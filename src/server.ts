@@ -22,6 +22,7 @@ import {
   createTelegramSession,
   deleteItem,
   getItem,
+  Item,
   getTelegramSessionUser,
   listItems,
   purgeExpiredTelegramSessions,
@@ -592,6 +593,119 @@ function buildContentDisposition(fileName: string): string {
   return `attachment; filename="${safeAscii}"; filename*=UTF-8''${encoded}`;
 }
 
+interface ResolvedDownloadFile {
+  filePath: string;
+  storedFileName: string;
+  stat: {
+    size: number;
+    isFile: () => boolean;
+  };
+  downloadFileName: string;
+  downloadMimeType: string;
+}
+
+async function resolveDownloadFileForItem(item: Item): Promise<ResolvedDownloadFile> {
+  if (item.status !== 'ready') {
+    throw new UserInputError('Элемент еще не готов к скачиванию.', 409);
+  }
+
+  if (!['file', 'youtube', 'instagram', 'hls', 'rutube', 'ok', 'vk'].includes(item.type)) {
+    throw new UserInputError('Скачивание для этого типа источника не поддерживается.', 400);
+  }
+
+  let storedFileName: string | null = null;
+  if (['file', 'youtube', 'instagram'].includes(item.type)) {
+    storedFileName = await findDirectMediaFileName(item.id);
+  } else if (['hls', 'rutube', 'ok', 'vk'].includes(item.type)) {
+    storedFileName = await ensureHlsDownloadFile(item.id);
+  }
+
+  if (!storedFileName) {
+    throw new UserInputError('Файл для скачивания не найден.', 404);
+  }
+
+  const baseDir = path.join(STORAGE_DIR, item.id);
+  let filePath: string;
+  try {
+    filePath = safeJoin(baseDir, storedFileName);
+  } catch {
+    throw new UserInputError('Некорректный путь к файлу.', 400);
+  }
+
+  let stat;
+  try {
+    stat = await fs.stat(filePath);
+  } catch {
+    throw new UserInputError('Файл для скачивания не найден.', 404);
+  }
+
+  if (!stat.isFile()) {
+    throw new UserInputError('Файл для скачивания не найден.', 404);
+  }
+
+  const preferredExt = resolvePreferredDownloadExtension(item, storedFileName);
+  const downloadFileName = buildDownloadFileNameWithPreferredExt(item.title || 'video', storedFileName, preferredExt);
+  const downloadMimeType = mime.lookup(downloadFileName) || mime.lookup(storedFileName) || 'application/octet-stream';
+
+  return {
+    filePath,
+    storedFileName,
+    stat,
+    downloadFileName,
+    downloadMimeType: String(downloadMimeType)
+  };
+}
+
+function inferPublicBaseUrl(req: express.Request): string {
+  if (BASE_URL) {
+    return BASE_URL;
+  }
+
+  const forwardedProto = req.headers['x-forwarded-proto'];
+  const proto = typeof forwardedProto === 'string'
+    ? forwardedProto.split(',')[0]?.trim() || (req.secure ? 'https' : 'http')
+    : req.secure
+      ? 'https'
+      : 'http';
+  const host = req.get('host');
+  if (!host) {
+    throw new UserInputError('Не удалось определить публичный адрес сервера.', 500);
+  }
+  return `${proto}://${host}`;
+}
+
+async function callTelegramBotApi(
+  method: 'sendDocument' | 'sendVideo',
+  payload: Record<string, unknown>,
+  timeoutMs = 30_000
+): Promise<void> {
+  if (!BOT_TOKEN) {
+    throw new UserInputError('BOT_TOKEN не задан на сервере.', 500);
+  }
+
+  const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(timeoutMs)
+  });
+
+  const raw = await response.text();
+  let decoded: { ok?: boolean; description?: string } | null = null;
+  try {
+    decoded = JSON.parse(raw) as { ok?: boolean; description?: string };
+  } catch {
+    decoded = null;
+  }
+
+  if (!response.ok || !decoded?.ok) {
+    const reason = decoded?.description || raw.slice(0, 500) || `HTTP ${response.status}`;
+    throw new Error(reason);
+  }
+}
+
 app.post('/api/telegram/auth', (req, res) => {
   if (!TELEGRAM_ENABLED) {
     res.status(400).json({ error: 'Telegram mode is disabled.' });
@@ -664,6 +778,12 @@ app.get('/api/telegram/me', (req, res) => {
 });
 
 app.get('/api/download-link/:id', (req, res) => {
+  const sessionUser = getTelegramSessionFromRequest(req);
+  if (TELEGRAM_ENABLED && !sessionUser) {
+    res.status(401).json({ error: 'Требуется авторизация через Telegram Mini App.' });
+    return;
+  }
+
   const { id } = req.params;
   if (!isSafeItemId(id)) {
     res.status(400).json({ error: 'Некорректный идентификатор элемента.' });
@@ -694,6 +814,71 @@ app.get('/api/download-link/:id', (req, res) => {
   } catch (error) {
     const status = error instanceof UserInputError ? error.statusCode : 500;
     res.status(status).json({ error: errorMessage(error) });
+  }
+});
+
+app.post('/api/telegram/send/:id', async (req, res) => {
+  if (!TELEGRAM_ENABLED) {
+    res.status(400).json({ error: 'Telegram mode is disabled.' });
+    return;
+  }
+
+  const sessionUser = getTelegramSessionFromRequest(req);
+  if (!sessionUser) {
+    res.status(401).json({ error: 'Требуется авторизация через Telegram Mini App.' });
+    return;
+  }
+
+  const { id } = req.params;
+  if (!isSafeItemId(id)) {
+    res.status(400).json({ error: 'Некорректный идентификатор элемента.' });
+    return;
+  }
+
+  const item = getItem(id);
+  if (!item) {
+    res.status(404).json({ error: 'Элемент не найден.' });
+    return;
+  }
+
+  try {
+    // Make sure file is prepared locally before sharing to Telegram.
+    const resolved = await resolveDownloadFileForItem(item);
+    const token = createDownloadToken(item.id);
+    const baseUrl = inferPublicBaseUrl(req);
+    const downloadUrl = `${baseUrl}/download/${encodeURIComponent(item.id)}?dl_token=${encodeURIComponent(token)}`;
+    const caption = `LinkCatcher: ${item.title}`.slice(0, 1024);
+
+    if (resolved.downloadMimeType.startsWith('video/')) {
+      try {
+        await callTelegramBotApi('sendVideo', {
+          chat_id: sessionUser.id,
+          video: downloadUrl,
+          caption,
+          supports_streaming: true
+        });
+      } catch {
+        await callTelegramBotApi('sendDocument', {
+          chat_id: sessionUser.id,
+          document: downloadUrl,
+          caption
+        });
+      }
+    } else {
+      await callTelegramBotApi('sendDocument', {
+        chat_id: sessionUser.id,
+        document: downloadUrl,
+        caption
+      });
+    }
+
+    res.json({
+      ok: true,
+      message: 'Файл отправлен в чат Telegram.'
+    });
+  } catch (error) {
+    const status = error instanceof UserInputError ? error.statusCode : 500;
+    res.status(status).json({ error: `Не удалось отправить файл в Telegram: ${errorMessage(error)}` });
   }
 });
 
@@ -990,67 +1175,23 @@ app.get('/download/:id', async (req, res) => {
     res.status(404).send('Элемент не найден.');
     return;
   }
-
-  if (item.status !== 'ready') {
-    res.status(409).send('Элемент еще не готов к скачиванию.');
-    return;
-  }
-
-  if (!['file', 'youtube', 'instagram', 'hls', 'rutube', 'ok', 'vk'].includes(item.type)) {
-    res.status(400).send('Скачивание для этого типа источника не поддерживается.');
-    return;
-  }
-
-  let storedFileName: string | null = null;
-  if (['file', 'youtube', 'instagram'].includes(item.type)) {
-    storedFileName = await findDirectMediaFileName(id);
-  } else if (['hls', 'rutube', 'ok', 'vk'].includes(item.type)) {
-    try {
-      storedFileName = await ensureHlsDownloadFile(id);
-    } catch (error) {
-      res.status(400).send(errorMessage(error));
-      return;
-    }
-  }
-
-  if (!storedFileName) {
-    res.status(404).send('Файл для скачивания не найден.');
-    return;
-  }
-
-  const baseDir = path.join(STORAGE_DIR, id);
-  let filePath: string;
+  let resolved: ResolvedDownloadFile;
   try {
-    filePath = safeJoin(baseDir, storedFileName);
-  } catch {
-    res.status(400).send('Некорректный путь к файлу.');
+    resolved = await resolveDownloadFileForItem(item);
+  } catch (error) {
+    const status = error instanceof UserInputError ? error.statusCode : 500;
+    res.status(status).send(errorMessage(error));
     return;
   }
 
-  let stat;
-  try {
-    stat = await fs.stat(filePath);
-  } catch {
-    res.status(404).send('Файл для скачивания не найден.');
-    return;
-  }
-
-  if (!stat.isFile()) {
-    res.status(404).send('Файл для скачивания не найден.');
-    return;
-  }
-
-  const preferredExt = resolvePreferredDownloadExtension(item, storedFileName);
-  const downloadFileName = buildDownloadFileNameWithPreferredExt(item.title || 'video', storedFileName, preferredExt);
-  const downloadMimeType = mime.lookup(downloadFileName) || mime.lookup(storedFileName) || 'application/octet-stream';
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('Content-Disposition', buildContentDisposition(downloadFileName));
-  res.setHeader('Content-Length', String(stat.size));
-  res.setHeader('Content-Type', String(downloadMimeType));
+  res.setHeader('Content-Disposition', buildContentDisposition(resolved.downloadFileName));
+  res.setHeader('Content-Length', String(resolved.stat.size));
+  res.setHeader('Content-Type', resolved.downloadMimeType);
   res.setHeader('Accept-Ranges', 'bytes');
   res.setHeader('Cache-Control', 'no-store');
 
-  const stream = createReadStream(filePath);
+  const stream = createReadStream(resolved.filePath);
   stream.on('error', () => {
     if (!res.headersSent) {
       res.status(500).send('Ошибка чтения файла.');

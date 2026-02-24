@@ -40,6 +40,7 @@ LinkCatcher is a small Node.js + TypeScript MVP web service for importing and st
   - `POST /api/telegram/auth`
   - `GET /api/telegram/me`
   - `GET /api/download-link/:id`
+  - `POST /api/telegram/send/:id` (send file directly to user chat)
   - `POST /api/inbox`
   - `POST /api/youtube/formats`
   - `GET /api/items`

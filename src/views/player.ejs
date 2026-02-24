@@ -71,6 +71,11 @@
         </p>
         <% if (canDownload) { %>
           <div class="inline-links">
+            <% if (telegramEnabled) { %>
+              <button type="button" class="link-tool link-send-telegram" data-telegram-id="<%= item.id %>">
+                Отправить в Telegram
+              </button>
+            <% } %>
             <a class="link-tool link-download" href="/download/<%= item.id %>" download>Скачать на устройство</a>
           </div>
         <% } %>

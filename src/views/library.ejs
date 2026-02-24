@@ -84,6 +84,11 @@
 
                 <div class="item-actions">
                   <% if (item.status === 'ready') { %>
+                    <% if (telegramEnabled) { %>
+                      <button type="button" class="link-tool link-send-telegram" data-telegram-id="<%= item.id %>">
+                        Отправить в Telegram
+                      </button>
+                    <% } %>
                     <a href="/download/<%= item.id %>" class="link-tool link-download" download>Скачать</a>
                     <a href="/play/<%= item.id %>" class="link-tool">Смотреть</a>
                   <% } %>

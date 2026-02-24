@@ -3,6 +3,20 @@
     return Boolean(window.Telegram && window.Telegram.WebApp);
   }
 
+  function showMessage(message) {
+    var text = typeof message === 'string' && message.trim() ? message.trim() : 'Операция выполнена.';
+    var tg = window.Telegram && window.Telegram.WebApp;
+    if (tg && typeof tg.showAlert === 'function') {
+      try {
+        tg.showAlert(text);
+        return;
+      } catch (_error) {
+        // Fallback to alert below.
+      }
+    }
+    window.alert(text);
+  }
+
   function openDownloadOutsideTelegram(url) {
     var tg = window.Telegram && window.Telegram.WebApp;
     if (tg && typeof tg.openLink === 'function') {
@@ -62,9 +76,75 @@
     return new URL(payload.url, window.location.origin).toString();
   }
 
+  function extractItemIdFromTelegramTarget(target) {
+    if (!(target instanceof Element)) {
+      return null;
+    }
+    var trigger = target.closest('.link-send-telegram');
+    if (!trigger) {
+      return null;
+    }
+    var itemId = trigger.getAttribute('data-telegram-id');
+    if (typeof itemId !== 'string' || !itemId.trim()) {
+      return null;
+    }
+    return itemId.trim();
+  }
+
+  async function sendItemToTelegram(itemId) {
+    var response = await fetch('/api/telegram/send/' + encodeURIComponent(itemId), {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        Accept: 'application/json'
+      }
+    });
+
+    var payload = null;
+    try {
+      payload = await response.json();
+    } catch (_error) {
+      payload = null;
+    }
+
+    if (!response.ok) {
+      var reason = payload && payload.error ? payload.error : 'Не удалось отправить файл в Telegram.';
+      throw new Error(reason);
+    }
+
+    return payload && payload.message ? payload.message : 'Файл отправлен в Telegram.';
+  }
+
   document.addEventListener('click', function (event) {
     var target = event.target;
     if (!(target instanceof Element)) {
+      return;
+    }
+
+    var telegramItemId = extractItemIdFromTelegramTarget(target);
+    if (telegramItemId) {
+      event.preventDefault();
+
+      var button = target.closest('.link-send-telegram');
+      if (button) {
+        button.classList.add('is-pending');
+        button.setAttribute('aria-busy', 'true');
+      }
+
+      sendItemToTelegram(telegramItemId)
+        .then(function (message) {
+          showMessage(message);
+        })
+        .catch(function (error) {
+          var reason = error instanceof Error ? error.message : 'Не удалось отправить файл в Telegram.';
+          showMessage(reason);
+        })
+        .finally(function () {
+          if (button) {
+            button.classList.remove('is-pending');
+            button.removeAttribute('aria-busy');
+          }
+        });
       return;
     }
 

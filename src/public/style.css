@@ -942,6 +942,11 @@ code,
   cursor: pointer;
 }
 
+.link-tool.is-pending {
+  opacity: 0.65;
+  pointer-events: none;
+}
+
 .home-formats,
 .home-status {
   width: min(1020px, 100%);
