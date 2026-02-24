@@ -119,6 +119,25 @@ This repo now includes a Docker-based deployment setup for Railway and Render.
 - `MAX_DOWNLOAD_BYTES` (default: `1073741824` = 1GB)
 - `MAX_HLS_SEGMENTS` (default: `5000`)
 - `REQUEST_TIMEOUT_MS` (default: `30000`)
+- `YTDL_COOKIES_FILE` (path to cookies.txt, optional)
+- `YTDL_COOKIES_B64` (base64 of cookies.txt, optional)
+- `YTDL_USER_AGENT` (custom user-agent for yt-dlp/youtube-dl, optional)
+- `YTDL_YOUTUBE_CLIENTS` (yt-dlp extractor args `youtube:player_client=...`, optional, e.g. `android,web`)
+
+### YouTube anti-bot note
+
+If YouTube returns `Sign in to confirm you’re not a bot`, configure authenticated cookies:
+
+1. Export YouTube cookies in `cookies.txt` format from your browser.
+2. Convert to base64:
+
+```bash
+base64 -i cookies.txt | tr -d '\n'
+```
+
+3. Set Railway variable:
+   - `YTDL_COOKIES_B64=<base64-output>`
+4. Redeploy service.
 
 ## Notes
 
