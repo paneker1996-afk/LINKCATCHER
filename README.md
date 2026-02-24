@@ -36,6 +36,9 @@ LinkCatcher is a small Node.js + TypeScript MVP web service for importing and st
   - `/` Home (paste URL + live status polling)
   - `/library` Library list with Play/Delete
   - `/play/:id` Local playback (`<video>` / `hls.js`)
+- Per-user library isolation (anonymous session cookie):
+  - each browser/device gets its own `lc_uid`
+  - item listing/read/delete/play/download are scoped to that owner only
 - API endpoints:
   - `POST /api/inbox`
   - `POST /api/youtube/formats`
@@ -144,6 +147,7 @@ base64 -i cookies.txt | tr -d '\n'
 - Large HLS playlists can take time to download because segments are stored locally for offline playback.
 - Deleting an item removes both DB metadata and corresponding local storage folder.
 - Unsupported reasons are source-specific (e.g. wrong Instagram path, blocked platform, non-media content type).
+- Anonymous per-device isolation uses cookies, so clearing browser cookies creates a new empty library.
 
 ## Vendored youtube-dl layout
 

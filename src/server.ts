@@ -7,7 +7,7 @@ import express from 'express';
 import rateLimit from 'express-rate-limit';
 import mime from 'mime-types';
 import { STORAGE_DIR } from './config';
-import { createItem, deleteItem, getItem, listItems, updateItem } from './db';
+import { createItem, deleteItemByOwner, getItemByOwner, listItemsByOwner, updateItem } from './db';
 import { detectSource } from './detector';
 import { Downloader } from './downloader';
 import { UserInputError, errorMessage, isSafeItemId, safeJoin, validateHttpUrl } from './security';
@@ -16,6 +16,12 @@ import { getYoutubeFormats, isYoutubeUrl } from './youtube';
 const app = express();
 const downloader = new Downloader();
 const hlsTranscodeJobs = new Map<string, Promise<void>>();
+const SESSION_COOKIE_NAME = 'lc_uid';
+const ONE_YEAR_SECONDS = 60 * 60 * 24 * 365;
+
+interface RequestWithOwner extends express.Request {
+  ownerId?: string;
+}
 const ffmpegStaticPath: string | null = (() => {
   try {
     const loaded = require('ffmpeg-static') as string | null;
@@ -27,10 +33,96 @@ const ffmpegStaticPath: string | null = (() => {
 
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'views'));
+app.set('trust proxy', 1);
 
 app.use(express.json({ limit: '256kb' }));
 app.use(express.urlencoded({ extended: false }));
 app.use('/public', express.static(path.join(__dirname, 'public')));
+
+function parseCookieHeader(headerValue: string | undefined): Record<string, string> {
+  if (!headerValue) {
+    return {};
+  }
+
+  const parts = headerValue.split(';');
+  const result: Record<string, string> = {};
+  for (const rawPart of parts) {
+    const part = rawPart.trim();
+    if (!part) {
+      continue;
+    }
+    const separatorIndex = part.indexOf('=');
+    if (separatorIndex <= 0) {
+      continue;
+    }
+    const key = part.slice(0, separatorIndex).trim();
+    const value = part.slice(separatorIndex + 1).trim();
+    if (!key || !value) {
+      continue;
+    }
+    try {
+      result[key] = decodeURIComponent(value);
+    } catch {
+      result[key] = value;
+    }
+  }
+
+  return result;
+}
+
+function isValidOwnerId(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+}
+
+function appendSetCookie(res: express.Response, value: string): void {
+  const current = res.getHeader('Set-Cookie');
+  if (!current) {
+    res.setHeader('Set-Cookie', value);
+    return;
+  }
+  if (Array.isArray(current)) {
+    res.setHeader('Set-Cookie', [...current, value]);
+    return;
+  }
+  res.setHeader('Set-Cookie', [String(current), value]);
+}
+
+function ensureOwnerId(req: express.Request, res: express.Response): string {
+  const cookies = parseCookieHeader(req.headers.cookie);
+  const existing = cookies[SESSION_COOKIE_NAME];
+  if (existing && isValidOwnerId(existing)) {
+    return existing;
+  }
+
+  const ownerId = crypto.randomUUID();
+  const isSecure = req.secure || req.get('x-forwarded-proto')?.toLowerCase().includes('https');
+  const cookieParts = [
+    `${SESSION_COOKIE_NAME}=${encodeURIComponent(ownerId)}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    `Max-Age=${ONE_YEAR_SECONDS}`
+  ];
+  if (isSecure) {
+    cookieParts.push('Secure');
+  }
+  appendSetCookie(res, cookieParts.join('; '));
+
+  return ownerId;
+}
+
+function getOwnerId(req: express.Request): string {
+  const ownerId = (req as RequestWithOwner).ownerId;
+  if (!ownerId) {
+    throw new Error('Owner ID не инициализирован');
+  }
+  return ownerId;
+}
+
+app.use((req, res, next) => {
+  (req as RequestWithOwner).ownerId = ensureOwnerId(req, res);
+  next();
+});
 
 const inboxLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -252,8 +344,9 @@ app.get('/', (_req, res) => {
   res.render('home');
 });
 
-app.get('/library', (_req, res) => {
-  const items = listItems();
+app.get('/library', (req, res) => {
+  const ownerId = getOwnerId(req);
+  const items = listItemsByOwner(ownerId);
   res.render('library', { items });
 });
 
@@ -264,7 +357,8 @@ app.get('/play/:id', async (req, res) => {
     return;
   }
 
-  const item = getItem(id);
+  const ownerId = getOwnerId(req);
+  const item = getItemByOwner(id, ownerId);
   if (!item) {
     res.status(404).send('Элемент не найден.');
     return;
@@ -323,6 +417,7 @@ app.get('/play/:id', async (req, res) => {
 });
 
 app.post('/api/inbox', inboxLimiter, async (req, res) => {
+  const ownerId = getOwnerId(req);
   const sourceUrl = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
   const formatId =
     typeof req.body?.formatId === 'string' && req.body.formatId.trim().length > 0 ? req.body.formatId.trim() : undefined;
@@ -349,6 +444,7 @@ app.post('/api/inbox', inboxLimiter, async (req, res) => {
   const id = crypto.randomUUID();
   createItem({
     id,
+    ownerId,
     sourceUrl,
     finalUrl: parsedUrl.toString(),
     type: 'unsupported',
@@ -397,7 +493,7 @@ app.post('/api/inbox', inboxLimiter, async (req, res) => {
       title: resolvedTitle
     });
 
-    const queuedItem = getItem(id);
+    const queuedItem = getItemByOwner(id, ownerId);
     if (queuedItem) {
       downloader.start(queuedItem, {
         youtubeFormatId: queuedItem.type === 'youtube' ? formatId : undefined
@@ -445,7 +541,8 @@ app.post('/api/youtube/formats', inboxLimiter, async (req, res) => {
 });
 
 app.get('/api/items', (_req, res) => {
-  res.json(listItems());
+  const ownerId = getOwnerId(_req);
+  res.json(listItemsByOwner(ownerId));
 });
 
 app.get('/api/items/:id', (req, res) => {
@@ -455,7 +552,8 @@ app.get('/api/items/:id', (req, res) => {
     return;
   }
 
-  const item = getItem(id);
+  const ownerId = getOwnerId(req);
+  const item = getItemByOwner(id, ownerId);
   if (!item) {
     res.status(404).json({ error: 'Элемент не найден.' });
     return;
@@ -471,7 +569,8 @@ app.delete('/api/items/:id', async (req, res) => {
     return;
   }
 
-  const existing = getItem(id);
+  const ownerId = getOwnerId(req);
+  const existing = getItemByOwner(id, ownerId);
   if (!existing) {
     res.status(404).json({ error: 'Элемент не найден.' });
     return;
@@ -479,7 +578,7 @@ app.delete('/api/items/:id', async (req, res) => {
 
   downloader.cancel(id);
   await fs.rm(path.join(STORAGE_DIR, id), { recursive: true, force: true });
-  deleteItem(id);
+  deleteItemByOwner(id, ownerId);
 
   res.status(204).send();
 });
@@ -491,7 +590,8 @@ app.get('/download/:id', async (req, res) => {
     return;
   }
 
-  const item = getItem(id);
+  const ownerId = getOwnerId(req);
+  const item = getItemByOwner(id, ownerId);
   if (!item) {
     res.status(404).send('Элемент не найден.');
     return;
@@ -575,7 +675,8 @@ app.get('/media/:id/*', async (req, res) => {
     return;
   }
 
-  const item = getItem(id);
+  const ownerId = getOwnerId(req);
+  const item = getItemByOwner(id, ownerId);
   if (!item || item.status !== 'ready') {
     res.status(404).send('Медиа не найдено.');
     return;
