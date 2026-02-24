@@ -129,6 +129,14 @@ const inboxLimiter = rateLimit({
   max: 15,
   standardHeaders: true,
   legacyHeaders: false,
+  validate: false,
+  keyGenerator: (req) => {
+    const ownerId = (req as RequestWithOwner).ownerId;
+    if (ownerId && isValidOwnerId(ownerId)) {
+      return `owner:${ownerId}`;
+    }
+    return `ip:${req.ip}`;
+  },
   message: {
     error: 'Слишком много запросов. Повторите через минуту.'
   }
