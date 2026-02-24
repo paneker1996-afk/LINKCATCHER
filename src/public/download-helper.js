@@ -160,17 +160,29 @@
 
     event.preventDefault();
     link.classList.add('is-pending');
+    link.setAttribute('aria-busy', 'true');
 
-    resolveSignedDownloadUrl(href)
-      .then(function (downloadUrl) {
-        openDownloadOutsideTelegram(downloadUrl);
+    var itemIdFromLink = extractItemIdFromDownloadHref(href);
+    var sendPromise = itemIdFromLink ? sendItemToTelegram(itemIdFromLink) : Promise.reject(new Error('No item id'));
+
+    sendPromise
+      .then(function (message) {
+        showMessage(message);
       })
-      .catch(function (_error) {
-        var fallbackUrl = new URL(href, window.location.origin).toString();
-        openDownloadOutsideTelegram(fallbackUrl);
+      .catch(function () {
+        // Fallback: open regular download URL outside Telegram.
+        return resolveSignedDownloadUrl(href)
+          .then(function (downloadUrl) {
+            openDownloadOutsideTelegram(downloadUrl);
+          })
+          .catch(function () {
+            var fallbackUrl = new URL(href, window.location.origin).toString();
+            openDownloadOutsideTelegram(fallbackUrl);
+          });
       })
       .finally(function () {
         link.classList.remove('is-pending');
+        link.removeAttribute('aria-busy');
       });
   });
 })();
