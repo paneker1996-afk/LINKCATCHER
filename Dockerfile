@@ -2,8 +2,6 @@ FROM node:20-bookworm-slim
 
 WORKDIR /app
 
-ENV NODE_ENV=production
-
 RUN apt-get update \
   && apt-get install -y --no-install-recommends python3 ffmpeg ca-certificates \
   && rm -rf /var/lib/apt/lists/*
@@ -21,6 +19,7 @@ RUN chmod +x /app/tools/youtube-dl.sh \
   && npm prune --omit=dev \
   && mkdir -p /app/storage /app/data
 
+ENV NODE_ENV=production
 ENV PORT=3000
 ENV HOST=0.0.0.0
 ENV DATA_DIR=/app/data
