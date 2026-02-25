@@ -6,6 +6,7 @@ export type ItemStatus = 'queued' | 'downloading' | 'ready' | 'unsupported' | 'e
 
 export interface Item {
   id: string;
+  ownerKey: string;
   sourceUrl: string;
   finalUrl: string;
   type: ItemType;
@@ -19,6 +20,7 @@ export interface Item {
 
 export interface NewItem {
   id: string;
+  ownerKey: string;
   sourceUrl: string;
   finalUrl: string;
   type: ItemType;
@@ -66,6 +68,7 @@ db.pragma('foreign_keys = ON');
 const ITEMS_TABLE_SQL = `
   CREATE TABLE IF NOT EXISTS items (
     id TEXT PRIMARY KEY,
+    ownerKey TEXT NOT NULL,
     sourceUrl TEXT NOT NULL,
     finalUrl TEXT NOT NULL,
     type TEXT NOT NULL CHECK(type IN ('file', 'hls', 'youtube', 'instagram', 'rutube', 'ok', 'vk', 'unsupported')),
@@ -115,6 +118,7 @@ function migrateItemsTableIfNeeded(): void {
   }
 
   if (
+    current.sql.includes('ownerKey') &&
     current.sql.includes("'youtube'") &&
     current.sql.includes("'instagram'") &&
     current.sql.includes("'rutube'") &&
@@ -128,8 +132,8 @@ function migrateItemsTableIfNeeded(): void {
     BEGIN;
     ALTER TABLE items RENAME TO items_old;
     ${ITEMS_TABLE_SQL};
-    INSERT INTO items (id, sourceUrl, finalUrl, type, status, reason, title, sizeBytes, createdAt, updatedAt)
-    SELECT id, sourceUrl, finalUrl, type, status, reason, title, sizeBytes, createdAt, updatedAt
+    INSERT INTO items (id, ownerKey, sourceUrl, finalUrl, type, status, reason, title, sizeBytes, createdAt, updatedAt)
+    SELECT id, 'legacy', sourceUrl, finalUrl, type, status, reason, title, sizeBytes, createdAt, updatedAt
     FROM items_old;
     DROP TABLE items_old;
     COMMIT;
@@ -139,17 +143,22 @@ function migrateItemsTableIfNeeded(): void {
 migrateItemsTableIfNeeded();
 db.exec(TELEGRAM_USERS_TABLE_SQL);
 db.exec(TELEGRAM_SESSIONS_TABLE_SQL);
+db.exec('CREATE INDEX IF NOT EXISTS idx_items_owner_created ON items(ownerKey, createdAt DESC)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_items_owner_id ON items(ownerKey, id)');
 db.exec('CREATE INDEX IF NOT EXISTS idx_telegram_sessions_expires_at ON telegram_sessions (expiresAt)');
 db.exec('CREATE INDEX IF NOT EXISTS idx_telegram_sessions_telegram_id ON telegram_sessions (telegramId)');
 
 const insertItemStmt = db.prepare(`
-  INSERT INTO items (id, sourceUrl, finalUrl, type, status, reason, title, sizeBytes, createdAt, updatedAt)
-  VALUES (@id, @sourceUrl, @finalUrl, @type, @status, @reason, @title, @sizeBytes, @createdAt, @updatedAt)
+  INSERT INTO items (id, ownerKey, sourceUrl, finalUrl, type, status, reason, title, sizeBytes, createdAt, updatedAt)
+  VALUES (@id, @ownerKey, @sourceUrl, @finalUrl, @type, @status, @reason, @title, @sizeBytes, @createdAt, @updatedAt)
 `);
 
 const getItemStmt = db.prepare('SELECT * FROM items WHERE id = ?');
+const getItemByOwnerStmt = db.prepare('SELECT * FROM items WHERE id = ? AND ownerKey = ?');
 const listItemsStmt = db.prepare('SELECT * FROM items ORDER BY createdAt DESC');
+const listItemsByOwnerStmt = db.prepare('SELECT * FROM items WHERE ownerKey = ? ORDER BY createdAt DESC');
 const deleteItemStmt = db.prepare('DELETE FROM items WHERE id = ?');
+const deleteItemByOwnerStmt = db.prepare('DELETE FROM items WHERE id = ? AND ownerKey = ?');
 const upsertTelegramUserStmt = db.prepare(`
   INSERT INTO telegram_users (
     telegramId,
@@ -211,6 +220,7 @@ export function createItem(input: NewItem): Item {
   const now = Date.now();
   const record: Item = {
     id: input.id,
+    ownerKey: input.ownerKey,
     sourceUrl: input.sourceUrl,
     finalUrl: input.finalUrl,
     type: input.type,
@@ -231,8 +241,17 @@ export function getItem(id: string): Item | null {
   return row ?? null;
 }
 
+export function getItemByOwner(id: string, ownerKey: string): Item | null {
+  const row = getItemByOwnerStmt.get(id, ownerKey) as Item | undefined;
+  return row ?? null;
+}
+
 export function listItems(): Item[] {
   return listItemsStmt.all() as Item[];
+}
+
+export function listItemsByOwner(ownerKey: string): Item[] {
+  return listItemsByOwnerStmt.all(ownerKey) as Item[];
 }
 
 export function updateItem(id: string, patch: ItemPatch): void {
@@ -253,6 +272,11 @@ export function updateItem(id: string, patch: ItemPatch): void {
 
 export function deleteItem(id: string): boolean {
   const result = deleteItemStmt.run(id);
+  return result.changes > 0;
+}
+
+export function deleteItemByOwner(id: string, ownerKey: string): boolean {
+  const result = deleteItemByOwnerStmt.run(id, ownerKey);
   return result.changes > 0;
 }
 

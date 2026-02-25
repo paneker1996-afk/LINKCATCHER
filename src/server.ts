@@ -20,11 +20,12 @@ import {
 import {
   createItem,
   createTelegramSession,
-  deleteItem,
+  deleteItemByOwner,
   getItem,
+  getItemByOwner,
   Item,
   getTelegramSessionUser,
-  listItems,
+  listItemsByOwner,
   purgeExpiredTelegramSessions,
   updateItem,
   upsertTelegramUser
@@ -38,6 +39,8 @@ const app = express();
 const downloader = new Downloader();
 const hlsTranscodeJobs = new Map<string, Promise<void>>();
 const SESSION_COOKIE_NAME = 'lc_session';
+const OWNER_COOKIE_NAME = 'lc_uid';
+const OWNER_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 365;
 const baseUrlProtocol = (() => {
   if (!BASE_URL) {
     return null;
@@ -232,6 +235,11 @@ function extractDownloadItemIdFromPath(pathname: string): string | null {
   return match ? match[1] : null;
 }
 
+function extractMediaItemIdFromPath(pathname: string): string | null {
+  const match = pathname.match(/^\/media\/([a-zA-Z0-9-]{1,100})\/.+$/);
+  return match ? match[1] : null;
+}
+
 function shouldUseSecureCookie(req: express.Request): boolean {
   if (baseUrlProtocol === 'https:') {
     return true;
@@ -275,6 +283,51 @@ function clearSessionCookie(req: express.Request): string {
     attributes.push('Secure');
   }
   return attributes.join('; ');
+}
+
+function appendSetCookie(res: express.Response, value: string): void {
+  const current = res.getHeader('Set-Cookie');
+  if (!current) {
+    res.setHeader('Set-Cookie', value);
+    return;
+  }
+  if (Array.isArray(current)) {
+    res.setHeader('Set-Cookie', [...current, value]);
+    return;
+  }
+  res.setHeader('Set-Cookie', [String(current), value]);
+}
+
+function isValidOwnerCookieId(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+}
+
+function buildOwnerCookie(req: express.Request, ownerId: string): string {
+  const attributes = [
+    `${OWNER_COOKIE_NAME}=${encodeURIComponent(ownerId)}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    `Max-Age=${String(OWNER_COOKIE_MAX_AGE_SECONDS)}`
+  ];
+
+  if (shouldUseSecureCookie(req)) {
+    attributes.push('Secure');
+  }
+
+  return attributes.join('; ');
+}
+
+function ensureAnonymousOwnerId(req: express.Request, res: express.Response): string {
+  const cookies = parseCookies(req.headers.cookie);
+  const existing = cookies[OWNER_COOKIE_NAME];
+  if (existing && isValidOwnerCookieId(existing)) {
+    return existing;
+  }
+
+  const ownerId = crypto.randomUUID();
+  appendSetCookie(res, buildOwnerCookie(req, ownerId));
+  return ownerId;
 }
 
 function toTelegramUser(value: unknown): TelegramInitDataUser | null {
@@ -381,6 +434,21 @@ function getTelegramSessionFromRequest(req: express.Request) {
   }
 
   return getTelegramSessionUser(sessionId);
+}
+
+function getRequestOwnerKey(req: express.Request, res: express.Response): string {
+  const sessionUser = getTelegramSessionFromRequest(req);
+  if (sessionUser) {
+    return `tg:${sessionUser.id}`;
+  }
+
+  const anonymousId = ensureAnonymousOwnerId(req, res);
+  return `anon:${anonymousId}`;
+}
+
+function getOwnedItemOrNull(req: express.Request, res: express.Response, itemId: string): Item | null {
+  const ownerKey = getRequestOwnerKey(req, res);
+  return getItemByOwner(itemId, ownerKey);
 }
 
 function renderWithTelegram(res: express.Response, view: string, payload: Record<string, unknown> = {}) {
@@ -793,7 +861,7 @@ app.get('/api/download-link/:id', (req, res) => {
     return;
   }
 
-  const item = getItem(id);
+  const item = getOwnedItemOrNull(req, res, id);
   if (!item) {
     res.status(404).json({ error: 'Элемент не найден.' });
     return;
@@ -838,7 +906,7 @@ app.post('/api/telegram/send/:id', async (req, res) => {
     return;
   }
 
-  const item = getItem(id);
+  const item = getOwnedItemOrNull(req, res, id);
   if (!item) {
     res.status(404).json({ error: 'Элемент не найден.' });
     return;
@@ -850,28 +918,18 @@ app.post('/api/telegram/send/:id', async (req, res) => {
     const token = createDownloadToken(item.id);
     const baseUrl = inferPublicBaseUrl(req);
     const downloadUrl = `${baseUrl}/download/${encodeURIComponent(item.id)}?dl_token=${encodeURIComponent(token)}`;
-    const caption = `LinkCatcher: ${item.title}`.slice(0, 1024);
+    const mediaUrl = `${baseUrl}/media/${encodeURIComponent(item.id)}/${encodeURIComponent(resolved.storedFileName)}?dl_token=${encodeURIComponent(token)}`;
 
     if (resolved.downloadMimeType.startsWith('video/')) {
-      try {
-        await callTelegramBotApi('sendVideo', {
-          chat_id: sessionUser.id,
-          video: downloadUrl,
-          caption,
-          supports_streaming: true
-        });
-      } catch {
-        await callTelegramBotApi('sendDocument', {
-          chat_id: sessionUser.id,
-          document: downloadUrl,
-          caption
-        });
-      }
+      await callTelegramBotApi('sendVideo', {
+        chat_id: sessionUser.id,
+        video: mediaUrl,
+        supports_streaming: true
+      });
     } else {
       await callTelegramBotApi('sendDocument', {
         chat_id: sessionUser.id,
-        document: downloadUrl,
-        caption
+        document: downloadUrl
       });
     }
 
@@ -906,6 +964,14 @@ app.use((req, res, next) => {
     }
   }
 
+  if (req.path.startsWith('/media/')) {
+    const itemId = extractMediaItemIdFromPath(req.path);
+    const tokenValue = typeof req.query?.dl_token === 'string' ? req.query.dl_token.trim() : '';
+    if (itemId && tokenValue && verifyDownloadToken(itemId, tokenValue)) {
+      return next();
+    }
+  }
+
   const requiresSession =
     req.path.startsWith('/api/') ||
     req.path.startsWith('/download/') ||
@@ -934,8 +1000,9 @@ app.get('/', (_req, res) => {
   renderWithTelegram(res, 'home');
 });
 
-app.get('/library', (_req, res) => {
-  const items = listItems();
+app.get('/library', (req, res) => {
+  const ownerKey = getRequestOwnerKey(req, res);
+  const items = listItemsByOwner(ownerKey);
   renderWithTelegram(res, 'library', { items });
 });
 
@@ -946,7 +1013,7 @@ app.get('/play/:id', async (req, res) => {
     return;
   }
 
-  const item = getItem(id);
+  const item = getOwnedItemOrNull(req, res, id);
   if (!item) {
     res.status(404).send('Элемент не найден.');
     return;
@@ -1005,6 +1072,7 @@ app.get('/play/:id', async (req, res) => {
 });
 
 app.post('/api/inbox', inboxLimiter, async (req, res) => {
+  const ownerKey = getRequestOwnerKey(req, res);
   const sourceUrl = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
   const formatId =
     typeof req.body?.formatId === 'string' && req.body.formatId.trim().length > 0 ? req.body.formatId.trim() : undefined;
@@ -1031,6 +1099,7 @@ app.post('/api/inbox', inboxLimiter, async (req, res) => {
   const id = crypto.randomUUID();
   createItem({
     id,
+    ownerKey,
     sourceUrl,
     finalUrl: parsedUrl.toString(),
     type: 'unsupported',
@@ -1079,7 +1148,7 @@ app.post('/api/inbox', inboxLimiter, async (req, res) => {
       title: resolvedTitle
     });
 
-    const queuedItem = getItem(id);
+    const queuedItem = getItemByOwner(id, ownerKey);
     if (queuedItem) {
       downloader.start(queuedItem, {
         youtubeFormatId: queuedItem.type === 'youtube' ? formatId : undefined
@@ -1126,8 +1195,9 @@ app.post('/api/youtube/formats', inboxLimiter, async (req, res) => {
   }
 });
 
-app.get('/api/items', (_req, res) => {
-  res.json(listItems());
+app.get('/api/items', (req, res) => {
+  const ownerKey = getRequestOwnerKey(req, res);
+  res.json(listItemsByOwner(ownerKey));
 });
 
 app.get('/api/items/:id', (req, res) => {
@@ -1137,7 +1207,7 @@ app.get('/api/items/:id', (req, res) => {
     return;
   }
 
-  const item = getItem(id);
+  const item = getOwnedItemOrNull(req, res, id);
   if (!item) {
     res.status(404).json({ error: 'Элемент не найден.' });
     return;
@@ -1153,7 +1223,8 @@ app.delete('/api/items/:id', async (req, res) => {
     return;
   }
 
-  const existing = getItem(id);
+  const ownerKey = getRequestOwnerKey(req, res);
+  const existing = getItemByOwner(id, ownerKey);
   if (!existing) {
     res.status(404).json({ error: 'Элемент не найден.' });
     return;
@@ -1161,7 +1232,7 @@ app.delete('/api/items/:id', async (req, res) => {
 
   downloader.cancel(id);
   await fs.rm(path.join(STORAGE_DIR, id), { recursive: true, force: true });
-  deleteItem(id);
+  deleteItemByOwner(id, ownerKey);
 
   res.status(204).send();
 });
@@ -1173,7 +1244,9 @@ app.get('/download/:id', async (req, res) => {
     return;
   }
 
-  const item = getItem(id);
+  const tokenValue = typeof req.query?.dl_token === 'string' ? req.query.dl_token.trim() : '';
+  const hasTokenAccess = tokenValue.length > 0 && verifyDownloadToken(id, tokenValue);
+  const item = hasTokenAccess ? getItem(id) : getOwnedItemOrNull(req, res, id);
   if (!item) {
     res.status(404).send('Элемент не найден.');
     return;
@@ -1214,7 +1287,9 @@ app.get('/media/:id/*', async (req, res) => {
     return;
   }
 
-  const item = getItem(id);
+  const tokenValue = typeof req.query?.dl_token === 'string' ? req.query.dl_token.trim() : '';
+  const hasTokenAccess = tokenValue.length > 0 && verifyDownloadToken(id, tokenValue);
+  const item = hasTokenAccess ? getItem(id) : getOwnedItemOrNull(req, res, id);
   if (!item || item.status !== 'ready') {
     res.status(404).send('Медиа не найдено.');
     return;

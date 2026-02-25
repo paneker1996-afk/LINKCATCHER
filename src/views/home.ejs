@@ -72,7 +72,7 @@
           enabled: true,
           minShowMs: 1400,
           maxShowMs: 4500,
-          oncePerSession: false
+          oncePerSession: true
         };
       </script>
       <script src="/public/telegram-webapp-auth.js"></script>
@@ -141,6 +141,24 @@
         formatsBox.innerHTML = '';
       }
 
+      async function readApiPayload(response) {
+        const contentType = response.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          try {
+            return await response.json();
+          } catch {
+            return null;
+          }
+        }
+
+        try {
+          const text = await response.text();
+          return { error: text || null };
+        } catch {
+          return null;
+        }
+      }
+
       async function submitInbox(url, formatId) {
         if (isSubmitting) {
           return;
@@ -153,6 +171,7 @@
         try {
           const response = await fetch('/api/inbox', {
             method: 'POST',
+            credentials: 'same-origin',
             headers: {
               'Content-Type': 'application/json'
             },
@@ -162,10 +181,11 @@
             })
           });
 
-          const payload = await response.json();
+          const payload = await readApiPayload(response);
 
           if (!response.ok) {
-            statusBox.innerHTML = `<p class="error">${payload.error || 'Не удалось выполнить запрос.'}</p>`;
+            const reason = payload && payload.error ? payload.error : `Ошибка запроса (${response.status}).`;
+            statusBox.innerHTML = `<p class="error">${escapeHtml(reason)}</p>`;
             return;
           }
 
@@ -181,7 +201,8 @@
             currentPollTimer = setInterval(() => pollItem(initial.id), 2000);
           }
         } catch (error) {
-          statusBox.innerHTML = '<p class="error">Не удалось отправить ссылку.</p>';
+          const reason = error instanceof Error ? error.message : 'Не удалось отправить ссылку.';
+          statusBox.innerHTML = `<p class="error">${escapeHtml(reason)}</p>`;
         } finally {
           isSubmitting = false;
         }
@@ -241,15 +262,17 @@
         try {
           const response = await fetch('/api/youtube/formats', {
             method: 'POST',
+            credentials: 'same-origin',
             headers: {
               'Content-Type': 'application/json'
             },
             body: JSON.stringify({ url })
           });
 
-          const payload = await response.json();
+          const payload = await readApiPayload(response);
           if (!response.ok) {
-            formatsBox.innerHTML = `<p class="error">${payload.error || 'Не удалось получить варианты.'}</p>`;
+            const reason = payload && payload.error ? payload.error : `Ошибка запроса (${response.status}).`;
+            formatsBox.innerHTML = `<p class="error">${escapeHtml(reason)}</p>`;
             selectedFormatId = null;
             return;
           }

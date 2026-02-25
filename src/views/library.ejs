@@ -89,7 +89,6 @@
                         Отправить в Telegram
                       </button>
                     <% } %>
-                    <a href="/download/<%= item.id %>" class="link-tool link-download" download>Скачать</a>
                     <a href="/play/<%= item.id %>" class="link-tool">Смотреть</a>
                   <% } %>
                   <button class="link-tool" data-id="<%= item.id %>">Удалить</button>
@@ -111,7 +110,7 @@
           enabled: true,
           minShowMs: 1400,
           maxShowMs: 4500,
-          oncePerSession: false
+          oncePerSession: true
         };
       </script>
       <script src="/public/telegram-webapp-auth.js"></script>
