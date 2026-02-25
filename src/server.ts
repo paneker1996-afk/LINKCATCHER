@@ -15,6 +15,7 @@ import {
   STORAGE_DIR,
   TELEGRAM_AUTH_MAX_AGE_SECONDS,
   TELEGRAM_ENABLED,
+  TELEGRAM_SEND_MAX_BYTES,
   WEBAPP_URL
 } from './config';
 import {
@@ -952,13 +953,14 @@ app.post('/api/telegram/send/:id', async (req, res) => {
   try {
     // Make sure file is prepared locally before sharing to Telegram.
     const resolved = await resolveDownloadFileForItem(item);
-    const telegramUploadLimitBytes = 49 * 1024 * 1024;
+    const telegramUploadLimitBytes = TELEGRAM_SEND_MAX_BYTES;
     const canUploadDirectly = resolved.stat.size > 0 && resolved.stat.size <= telegramUploadLimitBytes;
 
     if (!canUploadDirectly) {
       const sizeMb = (resolved.stat.size / (1024 * 1024)).toFixed(1);
+      const limitMb = (telegramUploadLimitBytes / (1024 * 1024)).toFixed(0);
       res.status(413).json({
-        error: `Файл ${sizeMb} МБ слишком большой для отправки в Telegram ботом. Скачайте файл на устройство.`
+        error: `Файл ${sizeMb} МБ превышает лимит отправки в бота (${limitMb} МБ). Скачайте файл на устройство.`
       });
       return;
     }

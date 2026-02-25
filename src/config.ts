@@ -110,6 +110,7 @@ export const SESSION_SECRET = readStringFromEnv('SESSION_SECRET');
 export const SESSION_TTL_SECONDS = readPositiveIntFromEnv('SESSION_TTL_SECONDS', 7 * 24 * 60 * 60);
 export const TELEGRAM_AUTH_MAX_AGE_SECONDS = readPositiveIntFromEnv('TELEGRAM_AUTH_MAX_AGE_SECONDS', 86_400);
 export const DOWNLOAD_LINK_TTL_SECONDS = readPositiveIntFromEnv('DOWNLOAD_LINK_TTL_SECONDS', 300);
+export const TELEGRAM_SEND_MAX_BYTES = readPositiveIntFromEnv('TELEGRAM_SEND_MAX_BYTES', 314_572_800); // 300MB
 
 fs.mkdirSync(STORAGE_DIR, { recursive: true });
 fs.mkdirSync(DATA_DIR, { recursive: true });
