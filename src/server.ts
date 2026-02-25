@@ -764,6 +764,71 @@ function runFfmpegProcess(args: string[]): Promise<void> {
   });
 }
 
+async function probeVideoMeta(filePath: string): Promise<{ width: number; height: number; duration?: number } | null> {
+  return new Promise((resolve) => {
+    const ffprobeBinary =
+      ffmpegStaticPath && ffmpegStaticPath.trim()
+        ? path.join(path.dirname(ffmpegStaticPath), process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe')
+        : 'ffprobe';
+
+    const child = spawn(
+      ffprobeBinary,
+      [
+        '-v',
+        'error',
+        '-select_streams',
+        'v:0',
+        '-show_entries',
+        'stream=width,height:format=duration',
+        '-of',
+        'json',
+        filePath
+      ],
+      { stdio: ['ignore', 'pipe', 'ignore'] }
+    );
+
+    let stdout = '';
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+
+    child.on('error', () => resolve(null));
+    child.on('close', (code) => {
+      if (code !== 0) {
+        resolve(null);
+        return;
+      }
+
+      try {
+        const parsed = JSON.parse(stdout) as {
+          streams?: Array<{ width?: number; height?: number }>;
+          format?: { duration?: string | number };
+        };
+        const width = Number(parsed.streams?.[0]?.width ?? 0);
+        const height = Number(parsed.streams?.[0]?.height ?? 0);
+        if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+          resolve(null);
+          return;
+        }
+
+        const durationRaw = parsed.format?.duration;
+        const durationNum = typeof durationRaw === 'string' ? Number.parseFloat(durationRaw) : Number(durationRaw ?? 0);
+        const duration =
+          Number.isFinite(durationNum) && durationNum > 0 ? Math.max(1, Math.round(durationNum)) : undefined;
+
+        resolve({
+          width: Math.round(width),
+          height: Math.round(height),
+          duration
+        });
+      } catch {
+        resolve(null);
+      }
+    });
+  });
+}
+
 async function ensureTelegramReadyVideo(item: Item, resolved: ResolvedDownloadFile): Promise<ResolvedDownloadFile> {
   if (!resolved.downloadMimeType.startsWith('video/')) {
     return resolved;
@@ -822,7 +887,7 @@ async function ensureTelegramReadyVideo(item: Item, resolved: ResolvedDownloadFi
         '-map',
         '0:a:0?',
         '-vf',
-        'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+        'scale=trunc(iw*sar/2)*2:trunc(ih/2)*2,setsar=1',
         '-c:v',
         'libx264',
         '-preset',
@@ -1095,30 +1160,27 @@ app.post('/api/telegram/send/:id', async (req, res) => {
     }
 
     if (telegramResolved.downloadMimeType.startsWith('video/')) {
-      try {
-        await callTelegramBotApiWithFile(
-          'sendVideo',
-          {
-            chat_id: sessionUser.id,
-            supports_streaming: true
-          },
-          'video',
-          telegramResolved.filePath,
-          telegramResolved.downloadFileName,
-          telegramResolved.downloadMimeType
-        );
-      } catch {
-        await callTelegramBotApiWithFile(
-          'sendDocument',
-          {
-            chat_id: sessionUser.id
-          },
-          'document',
-          telegramResolved.filePath,
-          telegramResolved.downloadFileName,
-          telegramResolved.downloadMimeType
-        );
+      const meta = await probeVideoMeta(telegramResolved.filePath);
+      const payload: Record<string, string | number | boolean> = {
+        chat_id: sessionUser.id,
+        supports_streaming: true
+      };
+      if (meta) {
+        payload.width = meta.width;
+        payload.height = meta.height;
+        if (meta.duration) {
+          payload.duration = meta.duration;
+        }
       }
+
+      await callTelegramBotApiWithFile(
+        'sendVideo',
+        payload,
+        'video',
+        telegramResolved.filePath,
+        telegramResolved.downloadFileName,
+        telegramResolved.downloadMimeType
+      );
     } else {
       await callTelegramBotApiWithFile(
         'sendDocument',
