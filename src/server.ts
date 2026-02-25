@@ -43,6 +43,8 @@ const SESSION_COOKIE_NAME = 'lc_session';
 const OWNER_COOKIE_NAME = 'lc_uid';
 const OWNER_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 365;
 const OWNER_SCOPE_VERSION = 'v2';
+const TELEGRAM_BOT_API_UPLOAD_LIMIT_BYTES = 49 * 1024 * 1024;
+const TELEGRAM_FALLBACK_LINK_TTL_SECONDS = 24 * 60 * 60;
 const baseUrlProtocol = (() => {
   if (!BASE_URL) {
     return null;
@@ -186,12 +188,12 @@ function parseSignedSessionToken(token: string | undefined): string | null {
   return sessionId;
 }
 
-function createDownloadToken(itemId: string): string {
+function createDownloadToken(itemId: string, ttlSeconds = DOWNLOAD_LINK_TTL_SECONDS): string {
   if (!SESSION_SECRET) {
     throw new UserInputError('SESSION_SECRET is missing for download token signing.', 500);
   }
 
-  const expiresAt = Math.floor(Date.now() / 1000) + DOWNLOAD_LINK_TTL_SECONDS;
+  const expiresAt = Math.floor(Date.now() / 1000) + Math.max(30, Math.floor(ttlSeconds));
   const payload = `${itemId}:${String(expiresAt)}`;
   const signature = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url');
   return `${String(expiresAt)}.${signature}`;
@@ -965,7 +967,7 @@ function inferPublicBaseUrl(req: express.Request): string {
 }
 
 async function callTelegramBotApi(
-  method: 'sendDocument' | 'sendVideo',
+  method: 'sendDocument' | 'sendVideo' | 'sendMessage',
   payload: Record<string, unknown>,
   timeoutMs = 30_000
 ): Promise<void> {
@@ -994,6 +996,17 @@ async function callTelegramBotApi(
     const reason = decoded?.description || raw.slice(0, 500) || `HTTP ${response.status}`;
     throw new Error(reason);
   }
+}
+
+async function sendTelegramFallbackLink(req: express.Request, chatId: string, item: Item): Promise<void> {
+  const token = createDownloadToken(item.id, TELEGRAM_FALLBACK_LINK_TTL_SECONDS);
+  const baseUrl = inferPublicBaseUrl(req);
+  const downloadUrl = `${baseUrl}/download/${encodeURIComponent(item.id)}?dl_token=${encodeURIComponent(token)}`;
+  await callTelegramBotApi('sendMessage', {
+    chat_id: chatId,
+    disable_web_page_preview: true,
+    text: `Файл слишком большой для прямой отправки ботом.\nСкачать: ${downloadUrl}`
+  });
 }
 
 async function callTelegramBotApiWithFile(
@@ -1178,14 +1191,16 @@ app.post('/api/telegram/send/:id', async (req, res) => {
         `[telegram-send] failed to normalize video for item ${item.id}: ${errorMessage(prepareError)}. Sending original file.`
       );
     }
-    const telegramUploadLimitBytes = TELEGRAM_SEND_MAX_BYTES;
+    const telegramUploadLimitBytes = Math.min(TELEGRAM_SEND_MAX_BYTES, TELEGRAM_BOT_API_UPLOAD_LIMIT_BYTES);
     const canUploadDirectly = telegramResolved.stat.size > 0 && telegramResolved.stat.size <= telegramUploadLimitBytes;
 
     if (!canUploadDirectly) {
       const sizeMb = (telegramResolved.stat.size / (1024 * 1024)).toFixed(1);
       const limitMb = (telegramUploadLimitBytes / (1024 * 1024)).toFixed(0);
-      res.status(413).json({
-        error: `Файл ${sizeMb} МБ превышает лимит отправки в бота (${limitMb} МБ). Скачайте файл на устройство.`
+      await sendTelegramFallbackLink(req, sessionUser.id, item);
+      res.json({
+        ok: true,
+        message: `Файл ${sizeMb} МБ превышает лимит отправки в Telegram (${limitMb} МБ). Отправил ссылку на скачивание в чат.`
       });
       return;
     }
@@ -1207,14 +1222,27 @@ app.post('/api/telegram/send/:id', async (req, res) => {
         `[telegram-send] method=sendVideo item=${item.id} sourceType=${item.type} file=${path.basename(telegramResolved.filePath)} size=${telegramResolved.stat.size} mime=${telegramResolved.downloadMimeType} meta=${meta ? `${meta.width}x${meta.height}/${meta.duration ?? 0}s` : 'none'}`
       );
 
-      await callTelegramBotApiWithFile(
-        'sendVideo',
-        payload,
-        'video',
-        telegramResolved.filePath,
-        telegramResolved.downloadFileName,
-        telegramResolved.downloadMimeType
-      );
+      try {
+        await callTelegramBotApiWithFile(
+          'sendVideo',
+          payload,
+          'video',
+          telegramResolved.filePath,
+          telegramResolved.downloadFileName,
+          telegramResolved.downloadMimeType
+        );
+      } catch (sendError) {
+        const message = errorMessage(sendError);
+        if (/request entity too large/i.test(message)) {
+          await sendTelegramFallbackLink(req, sessionUser.id, item);
+          res.json({
+            ok: true,
+            message: 'Файл слишком большой для отправки в Telegram. Отправил ссылку на скачивание в чат.'
+          });
+          return;
+        }
+        throw sendError;
+      }
     } else {
       console.info(
         `[telegram-send] method=sendDocument item=${item.id} sourceType=${item.type} file=${path.basename(telegramResolved.filePath)} size=${telegramResolved.stat.size} mime=${telegramResolved.downloadMimeType}`
