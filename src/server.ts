@@ -747,7 +747,7 @@ function runFfmpegProcess(args: string[]): Promise<void> {
       reject(new Error('Не удалось запустить ffmpeg. Установите ffmpeg или переустановите зависимости проекта.'));
     });
 
-    ffmpeg.on('close', (code) => {
+    ffmpeg.on('close', (code, signal) => {
       if (code === 0) {
         resolve();
         return;
@@ -759,7 +759,17 @@ function runFfmpegProcess(args: string[]): Promise<void> {
         .filter(Boolean)
         .slice(-4)
         .join(' ');
-      reject(new Error(details || `ffmpeg завершился с кодом ${String(code)}.`));
+      if (details) {
+        reject(new Error(details));
+        return;
+      }
+
+      if (signal) {
+        reject(new Error(`ffmpeg был остановлен сигналом ${signal}.`));
+        return;
+      }
+
+      reject(new Error(`ffmpeg завершился с кодом ${String(code)}.`));
     });
   });
 }
@@ -854,6 +864,28 @@ async function ensureTelegramReadyVideo(item: Item, resolved: ResolvedDownloadFi
 
   if (!targetStat) {
     await fs.rm(targetPath, { force: true });
+    const remuxArgs = [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-y',
+      '-i',
+      resolved.filePath,
+      '-map',
+      '0:v:0',
+      '-map',
+      '0:a:0?',
+      '-c:v',
+      'copy',
+      '-bsf:v',
+      'h264_metadata=sample_aspect_ratio=1/1',
+      '-c:a',
+      'copy',
+      '-movflags',
+      '+faststart',
+      targetPath
+    ];
+
     const transcodeArgs = [
       '-hide_banner',
       '-loglevel',
@@ -870,20 +902,29 @@ async function ensureTelegramReadyVideo(item: Item, resolved: ResolvedDownloadFi
       '-c:v',
       'libx264',
       '-preset',
-      'veryfast',
+      'ultrafast',
       '-crf',
-      '22',
+      '24',
       '-pix_fmt',
       'yuv420p',
       '-c:a',
       'aac',
       '-b:a',
-      '128k',
+      '96k',
+      '-ac',
+      '2',
+      '-threads',
+      '1',
       '-movflags',
       '+faststart',
       targetPath
     ];
-    await runFfmpegProcess(transcodeArgs);
+
+    try {
+      await runFfmpegProcess(remuxArgs);
+    } catch {
+      await runFfmpegProcess(transcodeArgs);
+    }
 
     targetStat = await fs.stat(targetPath);
     if (!targetStat.isFile() || targetStat.size <= 0) {
@@ -1124,7 +1165,14 @@ app.post('/api/telegram/send/:id', async (req, res) => {
   try {
     // Make sure file is prepared locally before sharing to Telegram.
     const resolved = await resolveDownloadFileForItem(item);
-    const telegramResolved = await ensureTelegramReadyVideo(item, resolved);
+    let telegramResolved = resolved;
+    try {
+      telegramResolved = await ensureTelegramReadyVideo(item, resolved);
+    } catch (prepareError) {
+      console.warn(
+        `[telegram-send] failed to normalize video for item ${item.id}: ${errorMessage(prepareError)}. Sending original file.`
+      );
+    }
     const telegramUploadLimitBytes = TELEGRAM_SEND_MAX_BYTES;
     const canUploadDirectly = telegramResolved.stat.size > 0 && telegramResolved.stat.size <= telegramUploadLimitBytes;
 
