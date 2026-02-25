@@ -51,16 +51,19 @@ const baseUrlProtocol = (() => {
 })();
 
 if (TELEGRAM_ENABLED && !BOT_TOKEN) {
-  throw new Error('BOT_TOKEN is required when TELEGRAM_ENABLED=true');
+  console.warn('[startup] TELEGRAM_ENABLED=true but BOT_TOKEN is empty. Telegram features will be disabled.');
 }
 
 if (TELEGRAM_ENABLED && !SESSION_SECRET) {
-  throw new Error('SESSION_SECRET is required when TELEGRAM_ENABLED=true');
+  console.warn('[startup] TELEGRAM_ENABLED=true but SESSION_SECRET is empty. Telegram features will be disabled.');
 }
 
 if (TELEGRAM_ENABLED && (!WEBAPP_URL || !/^https:\/\//i.test(WEBAPP_URL))) {
-  throw new Error('WEBAPP_URL must be a valid https:// URL when TELEGRAM_ENABLED=true');
+  console.warn('[startup] TELEGRAM_ENABLED=true but WEBAPP_URL is invalid. Telegram features will be disabled.');
 }
+
+const TELEGRAM_RUNTIME_ENABLED =
+  TELEGRAM_ENABLED && Boolean(BOT_TOKEN) && Boolean(SESSION_SECRET) && /^https:\/\//i.test(WEBAPP_URL);
 
 const ffmpegStaticPath: string | null = (() => {
   try {
@@ -366,7 +369,7 @@ function validateTelegramInitData(initData: string): TelegramAuthPayload {
 }
 
 function getTelegramSessionFromRequest(req: express.Request) {
-  if (!TELEGRAM_ENABLED) {
+  if (!TELEGRAM_RUNTIME_ENABLED) {
     return null;
   }
 
@@ -383,7 +386,7 @@ function getTelegramSessionFromRequest(req: express.Request) {
 function renderWithTelegram(res: express.Response, view: string, payload: Record<string, unknown> = {}) {
   res.render(view, {
     ...payload,
-    telegramEnabled: TELEGRAM_ENABLED
+    telegramEnabled: TELEGRAM_RUNTIME_ENABLED
   });
 }
 
@@ -707,7 +710,7 @@ async function callTelegramBotApi(
 }
 
 app.post('/api/telegram/auth', (req, res) => {
-  if (!TELEGRAM_ENABLED) {
+  if (!TELEGRAM_RUNTIME_ENABLED) {
     res.status(400).json({ error: 'Telegram mode is disabled.' });
     return;
   }
@@ -763,7 +766,7 @@ app.post('/api/telegram/auth', (req, res) => {
 });
 
 app.get('/api/telegram/me', (req, res) => {
-  if (!TELEGRAM_ENABLED) {
+  if (!TELEGRAM_RUNTIME_ENABLED) {
     res.json({ enabled: false, authenticated: false });
     return;
   }
@@ -779,7 +782,7 @@ app.get('/api/telegram/me', (req, res) => {
 
 app.get('/api/download-link/:id', (req, res) => {
   const sessionUser = getTelegramSessionFromRequest(req);
-  if (TELEGRAM_ENABLED && !sessionUser) {
+  if (TELEGRAM_RUNTIME_ENABLED && !sessionUser) {
     res.status(401).json({ error: 'Требуется авторизация через Telegram Mini App.' });
     return;
   }
@@ -818,7 +821,7 @@ app.get('/api/download-link/:id', (req, res) => {
 });
 
 app.post('/api/telegram/send/:id', async (req, res) => {
-  if (!TELEGRAM_ENABLED) {
+  if (!TELEGRAM_RUNTIME_ENABLED) {
     res.status(400).json({ error: 'Telegram mode is disabled.' });
     return;
   }
@@ -883,7 +886,7 @@ app.post('/api/telegram/send/:id', async (req, res) => {
 });
 
 app.use((req, res, next) => {
-  if (!TELEGRAM_ENABLED) {
+  if (!TELEGRAM_RUNTIME_ENABLED) {
     return next();
   }
 
