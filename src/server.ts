@@ -671,6 +671,7 @@ interface ResolvedDownloadFile {
   storedFileName: string;
   stat: {
     size: number;
+    mtimeMs: number;
     isFile: () => boolean;
   };
   downloadFileName: string;
@@ -726,6 +727,133 @@ async function resolveDownloadFileForItem(item: Item): Promise<ResolvedDownloadF
     stat,
     downloadFileName,
     downloadMimeType: String(downloadMimeType)
+  };
+}
+
+function runFfmpegProcess(args: string[]): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const ffmpegBinary = ffmpegStaticPath ?? 'ffmpeg';
+    const ffmpeg = spawn(ffmpegBinary, args, {
+      stdio: ['ignore', 'ignore', 'pipe']
+    });
+
+    let stderr = '';
+    ffmpeg.stderr.setEncoding('utf8');
+    ffmpeg.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+
+    ffmpeg.on('error', () => {
+      reject(new Error('Не удалось запустить ffmpeg. Установите ffmpeg или переустановите зависимости проекта.'));
+    });
+
+    ffmpeg.on('close', (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+
+      const details = stderr
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .slice(-4)
+        .join(' ');
+      reject(new Error(details || `ffmpeg завершился с кодом ${String(code)}.`));
+    });
+  });
+}
+
+async function ensureTelegramReadyVideo(item: Item, resolved: ResolvedDownloadFile): Promise<ResolvedDownloadFile> {
+  if (!resolved.downloadMimeType.startsWith('video/')) {
+    return resolved;
+  }
+
+  const targetName = 'telegram-send.mp4';
+  if (resolved.storedFileName === targetName) {
+    return resolved;
+  }
+
+  const itemDir = path.join(STORAGE_DIR, item.id);
+  const targetPath = path.join(itemDir, targetName);
+  let targetStat: Awaited<ReturnType<typeof fs.stat>> | null = null;
+
+  try {
+    const existing = await fs.stat(targetPath);
+    if (existing.isFile() && existing.size > 0 && existing.mtimeMs >= resolved.stat.mtimeMs) {
+      targetStat = existing;
+    }
+  } catch {
+    targetStat = null;
+  }
+
+  if (!targetStat) {
+    await fs.rm(targetPath, { force: true });
+    const copyArgs = [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-y',
+      '-i',
+      resolved.filePath,
+      '-map',
+      '0:v:0',
+      '-map',
+      '0:a:0?',
+      '-c',
+      'copy',
+      '-movflags',
+      '+faststart',
+      targetPath
+    ];
+
+    try {
+      await runFfmpegProcess(copyArgs);
+    } catch {
+      const transcodeArgs = [
+        '-hide_banner',
+        '-loglevel',
+        'error',
+        '-y',
+        '-i',
+        resolved.filePath,
+        '-map',
+        '0:v:0',
+        '-map',
+        '0:a:0?',
+        '-vf',
+        'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+        '-c:v',
+        'libx264',
+        '-preset',
+        'veryfast',
+        '-crf',
+        '22',
+        '-pix_fmt',
+        'yuv420p',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '128k',
+        '-movflags',
+        '+faststart',
+        targetPath
+      ];
+      await runFfmpegProcess(transcodeArgs);
+    }
+
+    targetStat = await fs.stat(targetPath);
+    if (!targetStat.isFile() || targetStat.size <= 0) {
+      throw new Error('Не удалось подготовить MP4 для отправки в Telegram.');
+    }
+  }
+
+  return {
+    filePath: targetPath,
+    storedFileName: targetName,
+    stat: targetStat,
+    downloadFileName: buildDownloadFileNameWithPreferredExt(item.title || 'video', targetName, '.mp4'),
+    downloadMimeType: 'video/mp4'
   };
 }
 
@@ -953,11 +1081,12 @@ app.post('/api/telegram/send/:id', async (req, res) => {
   try {
     // Make sure file is prepared locally before sharing to Telegram.
     const resolved = await resolveDownloadFileForItem(item);
+    const telegramResolved = await ensureTelegramReadyVideo(item, resolved);
     const telegramUploadLimitBytes = TELEGRAM_SEND_MAX_BYTES;
-    const canUploadDirectly = resolved.stat.size > 0 && resolved.stat.size <= telegramUploadLimitBytes;
+    const canUploadDirectly = telegramResolved.stat.size > 0 && telegramResolved.stat.size <= telegramUploadLimitBytes;
 
     if (!canUploadDirectly) {
-      const sizeMb = (resolved.stat.size / (1024 * 1024)).toFixed(1);
+      const sizeMb = (telegramResolved.stat.size / (1024 * 1024)).toFixed(1);
       const limitMb = (telegramUploadLimitBytes / (1024 * 1024)).toFixed(0);
       res.status(413).json({
         error: `Файл ${sizeMb} МБ превышает лимит отправки в бота (${limitMb} МБ). Скачайте файл на устройство.`
@@ -965,16 +1094,43 @@ app.post('/api/telegram/send/:id', async (req, res) => {
       return;
     }
 
-    await callTelegramBotApiWithFile(
-      'sendDocument',
-      {
-        chat_id: sessionUser.id
-      },
-      'document',
-      resolved.filePath,
-      resolved.downloadFileName,
-      resolved.downloadMimeType
-    );
+    if (telegramResolved.downloadMimeType.startsWith('video/')) {
+      try {
+        await callTelegramBotApiWithFile(
+          'sendVideo',
+          {
+            chat_id: sessionUser.id,
+            supports_streaming: true
+          },
+          'video',
+          telegramResolved.filePath,
+          telegramResolved.downloadFileName,
+          telegramResolved.downloadMimeType
+        );
+      } catch {
+        await callTelegramBotApiWithFile(
+          'sendDocument',
+          {
+            chat_id: sessionUser.id
+          },
+          'document',
+          telegramResolved.filePath,
+          telegramResolved.downloadFileName,
+          telegramResolved.downloadMimeType
+        );
+      }
+    } else {
+      await callTelegramBotApiWithFile(
+        'sendDocument',
+        {
+          chat_id: sessionUser.id
+        },
+        'document',
+        telegramResolved.filePath,
+        telegramResolved.downloadFileName,
+        telegramResolved.downloadMimeType
+      );
+    }
 
     res.json({
       ok: true,
