@@ -854,7 +854,7 @@ async function ensureTelegramReadyVideo(item: Item, resolved: ResolvedDownloadFi
 
   if (!targetStat) {
     await fs.rm(targetPath, { force: true });
-    const copyArgs = [
+    const transcodeArgs = [
       '-hide_banner',
       '-loglevel',
       'error',
@@ -865,47 +865,25 @@ async function ensureTelegramReadyVideo(item: Item, resolved: ResolvedDownloadFi
       '0:v:0',
       '-map',
       '0:a:0?',
-      '-c',
-      'copy',
+      '-vf',
+      'scale=trunc(iw*sar/2)*2:trunc(ih/2)*2,setsar=1',
+      '-c:v',
+      'libx264',
+      '-preset',
+      'veryfast',
+      '-crf',
+      '22',
+      '-pix_fmt',
+      'yuv420p',
+      '-c:a',
+      'aac',
+      '-b:a',
+      '128k',
       '-movflags',
       '+faststart',
       targetPath
     ];
-
-    try {
-      await runFfmpegProcess(copyArgs);
-    } catch {
-      const transcodeArgs = [
-        '-hide_banner',
-        '-loglevel',
-        'error',
-        '-y',
-        '-i',
-        resolved.filePath,
-        '-map',
-        '0:v:0',
-        '-map',
-        '0:a:0?',
-        '-vf',
-        'scale=trunc(iw*sar/2)*2:trunc(ih/2)*2,setsar=1',
-        '-c:v',
-        'libx264',
-        '-preset',
-        'veryfast',
-        '-crf',
-        '22',
-        '-pix_fmt',
-        'yuv420p',
-        '-c:a',
-        'aac',
-        '-b:a',
-        '128k',
-        '-movflags',
-        '+faststart',
-        targetPath
-      ];
-      await runFfmpegProcess(transcodeArgs);
-    }
+    await runFfmpegProcess(transcodeArgs);
 
     targetStat = await fs.stat(targetPath);
     if (!targetStat.isFile() || targetStat.size <= 0) {
