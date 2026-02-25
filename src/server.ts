@@ -778,6 +778,48 @@ async function callTelegramBotApi(
   }
 }
 
+async function callTelegramBotApiWithFile(
+  method: 'sendDocument' | 'sendVideo',
+  payload: Record<string, string | number | boolean>,
+  fileField: 'document' | 'video',
+  filePath: string,
+  fileName: string,
+  mimeType: string,
+  timeoutMs = 90_000
+): Promise<void> {
+  if (!BOT_TOKEN) {
+    throw new UserInputError('BOT_TOKEN не задан на сервере.', 500);
+  }
+
+  const form = new FormData();
+  for (const [key, value] of Object.entries(payload)) {
+    form.set(key, String(value));
+  }
+
+  const buffer = await fs.readFile(filePath);
+  const blob = new Blob([buffer], { type: mimeType });
+  form.set(fileField, blob, fileName);
+
+  const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
+    method: 'POST',
+    body: form,
+    signal: AbortSignal.timeout(timeoutMs)
+  });
+
+  const raw = await response.text();
+  let decoded: { ok?: boolean; description?: string } | null = null;
+  try {
+    decoded = JSON.parse(raw) as { ok?: boolean; description?: string };
+  } catch {
+    decoded = null;
+  }
+
+  if (!response.ok || !decoded?.ok) {
+    const reason = decoded?.description || raw.slice(0, 500) || `HTTP ${response.status}`;
+    throw new Error(reason);
+  }
+}
+
 app.post('/api/telegram/auth', (req, res) => {
   if (!TELEGRAM_RUNTIME_ENABLED) {
     res.status(400).json({ error: 'Telegram mode is disabled.' });
@@ -910,22 +952,53 @@ app.post('/api/telegram/send/:id', async (req, res) => {
   try {
     // Make sure file is prepared locally before sharing to Telegram.
     const resolved = await resolveDownloadFileForItem(item);
-    const token = createDownloadToken(item.id);
-    const baseUrl = inferPublicBaseUrl(req);
-    const downloadUrl = `${baseUrl}/download/${encodeURIComponent(item.id)}?dl_token=${encodeURIComponent(token)}`;
-    const mediaUrl = `${baseUrl}/media/${encodeURIComponent(item.id)}/${encodeURIComponent(resolved.storedFileName)}?dl_token=${encodeURIComponent(token)}`;
+    const telegramUploadLimitBytes = 49 * 1024 * 1024;
+    const canUploadDirectly = resolved.stat.size > 0 && resolved.stat.size <= telegramUploadLimitBytes;
+
+    if (!canUploadDirectly) {
+      const sizeMb = (resolved.stat.size / (1024 * 1024)).toFixed(1);
+      res.status(413).json({
+        error: `Файл ${sizeMb} МБ слишком большой для отправки в Telegram ботом. Скачайте файл на устройство.`
+      });
+      return;
+    }
 
     if (resolved.downloadMimeType.startsWith('video/')) {
-      await callTelegramBotApi('sendVideo', {
-        chat_id: sessionUser.id,
-        video: mediaUrl,
-        supports_streaming: true
-      });
+      try {
+        await callTelegramBotApiWithFile(
+          'sendVideo',
+          {
+            chat_id: sessionUser.id,
+            supports_streaming: true
+          },
+          'video',
+          resolved.filePath,
+          resolved.downloadFileName,
+          resolved.downloadMimeType
+        );
+      } catch {
+        await callTelegramBotApiWithFile(
+          'sendDocument',
+          {
+            chat_id: sessionUser.id
+          },
+          'document',
+          resolved.filePath,
+          resolved.downloadFileName,
+          resolved.downloadMimeType
+        );
+      }
     } else {
-      await callTelegramBotApi('sendDocument', {
-        chat_id: sessionUser.id,
-        document: downloadUrl
-      });
+      await callTelegramBotApiWithFile(
+        'sendDocument',
+        {
+          chat_id: sessionUser.id
+        },
+        'document',
+        resolved.filePath,
+        resolved.downloadFileName,
+        resolved.downloadMimeType
+      );
     }
 
     res.json({
