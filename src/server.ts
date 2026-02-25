@@ -844,7 +844,7 @@ async function ensureTelegramReadyVideo(item: Item, resolved: ResolvedDownloadFi
     return resolved;
   }
 
-  const targetName = 'telegram-send.mp4';
+  const targetName = 'telegram-send-v2.mp4';
   if (resolved.storedFileName === targetName) {
     return resolved;
   }
@@ -864,6 +864,7 @@ async function ensureTelegramReadyVideo(item: Item, resolved: ResolvedDownloadFi
 
   if (!targetStat) {
     await fs.rm(targetPath, { force: true });
+    const shouldForceTranscode = ['hls', 'rutube', 'ok', 'vk'].includes(item.type);
     const remuxArgs = [
       '-hide_banner',
       '-loglevel',
@@ -920,10 +921,14 @@ async function ensureTelegramReadyVideo(item: Item, resolved: ResolvedDownloadFi
       targetPath
     ];
 
-    try {
-      await runFfmpegProcess(remuxArgs);
-    } catch {
+    if (shouldForceTranscode) {
       await runFfmpegProcess(transcodeArgs);
+    } else {
+      try {
+        await runFfmpegProcess(remuxArgs);
+      } catch {
+        await runFfmpegProcess(transcodeArgs);
+      }
     }
 
     targetStat = await fs.stat(targetPath);
@@ -1198,6 +1203,9 @@ app.post('/api/telegram/send/:id', async (req, res) => {
           payload.duration = meta.duration;
         }
       }
+      console.info(
+        `[telegram-send] method=sendVideo item=${item.id} sourceType=${item.type} file=${path.basename(telegramResolved.filePath)} size=${telegramResolved.stat.size} mime=${telegramResolved.downloadMimeType} meta=${meta ? `${meta.width}x${meta.height}/${meta.duration ?? 0}s` : 'none'}`
+      );
 
       await callTelegramBotApiWithFile(
         'sendVideo',
@@ -1208,6 +1216,9 @@ app.post('/api/telegram/send/:id', async (req, res) => {
         telegramResolved.downloadMimeType
       );
     } else {
+      console.info(
+        `[telegram-send] method=sendDocument item=${item.id} sourceType=${item.type} file=${path.basename(telegramResolved.filePath)} size=${telegramResolved.stat.size} mime=${telegramResolved.downloadMimeType}`
+      );
       await callTelegramBotApiWithFile(
         'sendDocument',
         {
