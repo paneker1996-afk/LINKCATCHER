@@ -965,43 +965,16 @@ app.post('/api/telegram/send/:id', async (req, res) => {
       return;
     }
 
-    if (resolved.downloadMimeType.startsWith('video/')) {
-      try {
-        await callTelegramBotApiWithFile(
-          'sendVideo',
-          {
-            chat_id: sessionUser.id,
-            supports_streaming: true
-          },
-          'video',
-          resolved.filePath,
-          resolved.downloadFileName,
-          resolved.downloadMimeType
-        );
-      } catch {
-        await callTelegramBotApiWithFile(
-          'sendDocument',
-          {
-            chat_id: sessionUser.id
-          },
-          'document',
-          resolved.filePath,
-          resolved.downloadFileName,
-          resolved.downloadMimeType
-        );
-      }
-    } else {
-      await callTelegramBotApiWithFile(
-        'sendDocument',
-        {
-          chat_id: sessionUser.id
-        },
-        'document',
-        resolved.filePath,
-        resolved.downloadFileName,
-        resolved.downloadMimeType
-      );
-    }
+    await callTelegramBotApiWithFile(
+      'sendDocument',
+      {
+        chat_id: sessionUser.id
+      },
+      'document',
+      resolved.filePath,
+      resolved.downloadFileName,
+      resolved.downloadMimeType
+    );
 
     res.json({
       ok: true,
