@@ -443,11 +443,6 @@ function getRequestOwnerKey(req: express.Request, res: express.Response): string
     return `tg:${OWNER_SCOPE_VERSION}:${sessionUser.id}`;
   }
 
-  if (TELEGRAM_RUNTIME_ENABLED) {
-    // In Telegram mode, avoid mixing anonymous browser data before auth is finished.
-    return `tg:${OWNER_SCOPE_VERSION}:unauthenticated`;
-  }
-
   const anonymousId = ensureAnonymousOwnerId(req, res);
   return `anon:${OWNER_SCOPE_VERSION}:${anonymousId}`;
 }
@@ -855,12 +850,6 @@ app.get('/api/telegram/me', (req, res) => {
 });
 
 app.get('/api/download-link/:id', (req, res) => {
-  const sessionUser = getTelegramSessionFromRequest(req);
-  if (TELEGRAM_RUNTIME_ENABLED && !sessionUser) {
-    res.status(401).json({ error: 'Требуется авторизация через Telegram Mini App.' });
-    return;
-  }
-
   const { id } = req.params;
   if (!isSafeItemId(id)) {
     res.status(400).json({ error: 'Некорректный идентификатор элемента.' });
@@ -978,11 +967,7 @@ app.use((req, res, next) => {
     }
   }
 
-  const requiresSession =
-    req.path.startsWith('/api/') ||
-    req.path.startsWith('/download/') ||
-    req.path.startsWith('/media/') ||
-    req.path.startsWith('/play/');
+  const requiresSession = req.path.startsWith('/api/telegram/send/');
 
   if (!requiresSession) {
     return next();
