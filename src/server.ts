@@ -41,6 +41,7 @@ const hlsTranscodeJobs = new Map<string, Promise<void>>();
 const SESSION_COOKIE_NAME = 'lc_session';
 const OWNER_COOKIE_NAME = 'lc_uid';
 const OWNER_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 365;
+const OWNER_SCOPE_VERSION = 'v2';
 const baseUrlProtocol = (() => {
   if (!BASE_URL) {
     return null;
@@ -439,11 +440,16 @@ function getTelegramSessionFromRequest(req: express.Request) {
 function getRequestOwnerKey(req: express.Request, res: express.Response): string {
   const sessionUser = getTelegramSessionFromRequest(req);
   if (sessionUser) {
-    return `tg:${sessionUser.id}`;
+    return `tg:${OWNER_SCOPE_VERSION}:${sessionUser.id}`;
+  }
+
+  if (TELEGRAM_RUNTIME_ENABLED) {
+    // In Telegram mode, avoid mixing anonymous browser data before auth is finished.
+    return `tg:${OWNER_SCOPE_VERSION}:unauthenticated`;
   }
 
   const anonymousId = ensureAnonymousOwnerId(req, res);
-  return `anon:${anonymousId}`;
+  return `anon:${OWNER_SCOPE_VERSION}:${anonymousId}`;
 }
 
 function getOwnedItemOrNull(req: express.Request, res: express.Response, itemId: string): Item | null {
@@ -1317,9 +1323,19 @@ app.get('/media/:id/*', async (req, res) => {
     return;
   }
 
-  const detectedType = mime.lookup(filePath);
+  let detectedType = mime.lookup(filePath);
+  if (!detectedType) {
+    const requestedName = path.basename(filePath).toLowerCase();
+    if (requestedName.startsWith('image.')) {
+      detectedType = 'image/jpeg';
+    } else if (requestedName.endsWith('.m3u8')) {
+      detectedType = 'application/vnd.apple.mpegurl';
+    } else if (item.type !== 'unsupported') {
+      detectedType = 'video/mp4';
+    }
+  }
   if (detectedType) {
-    res.type(detectedType);
+    res.type(String(detectedType));
   }
 
   res.sendFile(filePath);

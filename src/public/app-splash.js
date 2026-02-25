@@ -17,14 +17,23 @@
   }
 
   if (config.oncePerSession !== false) {
+    var storageKey = 'lc_splash_seen_v2';
     try {
-      if (sessionStorage.getItem('lc_splash_seen') === '1') {
+      if (window.localStorage.getItem(storageKey) === '1') {
         splash.remove();
         return;
       }
-      sessionStorage.setItem('lc_splash_seen', '1');
+      window.localStorage.setItem(storageKey, '1');
     } catch (_error) {
-      // Ignore sessionStorage restrictions and continue.
+      try {
+        if (window.sessionStorage.getItem(storageKey) === '1') {
+          splash.remove();
+          return;
+        }
+        window.sessionStorage.setItem(storageKey, '1');
+      } catch (_nestedError) {
+        // Ignore storage restrictions and continue.
+      }
     }
   }
 
